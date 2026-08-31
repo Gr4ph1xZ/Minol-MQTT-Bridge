@@ -220,7 +220,8 @@ class MinolConnector:
             logger.error("Response content saved to user_tenants_error_response.html")
             raise
 
-    def fetch_em_data(self, timeline_start, timeline_end, cons_type="HEIZUNG", dlg_key="100EH"):
+    def fetch_em_data(self, timeline_start, timeline_end, cons_type="HEIZUNG",
+                      dlg_key="100EH", values_in_kwh=True, max_retries=3):
         """
         Fetch eMonitoring data for a specific consumption type.
 
@@ -229,11 +230,16 @@ class MinolConnector:
             timeline_end (str): End period in format YYYYMM (e.g., "202510")
             cons_type (str): Type of consumption - "HEIZUNG", "WARMWASSER", or "KALTWASSER"
             dlg_key (str): Dialog key, default "100EH" for heating
+            values_in_kwh (bool): Request values converted to kWh. Some heating
+                installations (heat cost allocators) only return a per-room table
+                when this is False.
+            max_retries (int): Attempts for transient network/5xx/JSON errors.
 
         Returns:
             dict: JSON response containing table (per room) and chart (timeline) data
         """
-        logger.info(f"Fetching eMonitoring data for {cons_type} from {timeline_start} to {timeline_end}")
+        logger.info(f"Fetching eMonitoring data for {cons_type} from {timeline_start} "
+                    f"to {timeline_end} (valuesInKWH={values_in_kwh})")
         url = f"{self.base_url}/minol.com~kundenportal~em~web/rest/EMData/readData"
         payload = {
             "userNum": self.user_num,
@@ -247,7 +253,7 @@ class MinolConnector:
             "timelineStartTxt": f"{timeline_start[4:]}.{timeline_start[:4]}",
             "timelineEnd": timeline_end,
             "timelineEndTxt": f"{timeline_end[4:]}.{timeline_end[:4]}",
-            "valuesInKWH": True,
+            "valuesInKWH": values_in_kwh,
             "dlgKey": dlg_key,
         }
         headers = {
@@ -261,21 +267,40 @@ class MinolConnector:
         logger.debug(f"Request Payload: {json.dumps(payload, indent=2)}")
         logger.debug(f"Request Headers: {json.dumps(headers, indent=2)}")
 
-        try:
-            response = self.session.post(url, headers=headers, data=json.dumps(payload))
-            response.raise_for_status()
-            logger.debug(f"EM data response status: {response.status_code}")
-            logger.debug(f"EM data response content: {response.text[:200]}...")
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error fetching EM data: {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding EM data response: {e}")
-            with open("em_data_error_response.html", "w", encoding="utf-8") as f:
-                f.write(response.text)
-            logger.error("Response content saved to em_data_error_response.html")
-            raise
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.session.post(url, headers=headers, data=json.dumps(payload))
+                response.raise_for_status()
+                logger.debug(f"EM data response status: {response.status_code}")
+                # Full body at DEBUG - the per-room 'table' can be far past the
+                # first few hundred characters, and an empty table for HEIZUNG is
+                # only diagnosable with the whole payload.
+                logger.debug(f"EM data response content ({cons_type}): {response.text}")
+                return response.json()
+            except requests.exceptions.HTTPError as e:
+                last_error = e
+                status = getattr(e.response, "status_code", None)
+                if status is not None and status < 500:
+                    logger.error(f"HTTP {status} fetching EM data for {cons_type}: {e}")
+                    raise
+                logger.warning(f"HTTP {status} fetching EM data for {cons_type} "
+                               f"(attempt {attempt}/{max_retries}): {e}")
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                logger.warning(f"Network error fetching EM data for {cons_type} "
+                               f"(attempt {attempt}/{max_retries}): {e}")
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(f"Non-JSON EM data response for {cons_type} "
+                               f"(attempt {attempt}/{max_retries}): {e}")
+                logger.debug(f"Offending response body: {response.text[:2000]}")
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+
+        logger.error(f"Giving up fetching EM data for {cons_type} after "
+                     f"{max_retries} attempts: {last_error}")
+        raise last_error or RuntimeError(f"EM data fetch failed for {cons_type}")
 
     def get_all_consumption_data(self, timeline_start, timeline_end):
         """
@@ -319,32 +344,52 @@ class MinolConnector:
             }
         }
 
-        try:
-            heating_raw = self.fetch_em_data(timeline_start, timeline_end, cons_type="HEIZUNG", dlg_key="100EH")
-            consumption_data["heating"] = self._process_consumption_data(
-                heating_raw, "HEIZUNG", timeline_start, timeline_end
-            )
-        except Exception as e:
-            logger.error(f"Error fetching heating data: {e}")
-            consumption_data["heating"] = {"error": str(e)}
+        for key, cons_type, dlg_key in (
+            ("heating", "HEIZUNG", "100EH"),
+            ("hot_water", "WARMWASSER", "100WW"),
+            ("cold_water", "KALTWASSER", "100KW"),
+        ):
+            try:
+                raw = self.fetch_em_data(
+                    timeline_start, timeline_end, cons_type=cons_type, dlg_key=dlg_key
+                )
+                processed = self._process_consumption_data(
+                    raw, cons_type, timeline_start, timeline_end
+                )
 
-        try:
-            hot_water_raw = self.fetch_em_data(timeline_start, timeline_end, cons_type="WARMWASSER", dlg_key="100WW")
-            consumption_data["hot_water"] = self._process_consumption_data(
-                hot_water_raw, "WARMWASSER", timeline_start, timeline_end
-            )
-        except Exception as e:
-            logger.error(f"Error fetching hot water data: {e}")
-            consumption_data["hot_water"] = {"error": str(e)}
+                # If no per-room table came back, retry once without the kWh
+                # conversion. Heat cost allocators frequently only expose the
+                # room table in their native units.
+                if not processed["by_room"]:
+                    logger.warning(
+                        f"{cons_type}: empty per-room table with valuesInKWH=True; "
+                        f"retrying with valuesInKWH=False"
+                    )
+                    try:
+                        raw_native = self.fetch_em_data(
+                            timeline_start, timeline_end, cons_type=cons_type,
+                            dlg_key=dlg_key, values_in_kwh=False
+                        )
+                        processed_native = self._process_consumption_data(
+                            raw_native, cons_type, timeline_start, timeline_end
+                        )
+                        if processed_native["by_room"] or (
+                            not processed["timeline"] and processed_native["timeline"]
+                        ):
+                            processed = processed_native
+                    except Exception as e:
+                        logger.warning(f"{cons_type}: valuesInKWH=False retry failed: {e}")
 
-        try:
-            cold_water_raw = self.fetch_em_data(timeline_start, timeline_end, cons_type="KALTWASSER", dlg_key="100KW")
-            consumption_data["cold_water"] = self._process_consumption_data(
-                cold_water_raw, "KALTWASSER", timeline_start, timeline_end
-            )
-        except Exception as e:
-            logger.error(f"Error fetching cold water data: {e}")
-            consumption_data["cold_water"] = {"error": str(e)}
+                if not processed["by_room"] and processed.get("total_source") != "chart":
+                    logger.warning(
+                        f"{cons_type}: portal returned no per-room table and no "
+                        f"usable chart values for {timeline_start}-{timeline_end}"
+                    )
+
+                consumption_data[key] = processed
+            except Exception as e:
+                logger.error(f"Error fetching {key} data: {e}")
+                consumption_data[key] = {"error": str(e)}
 
         return consumption_data
 
@@ -367,37 +412,94 @@ class MinolConnector:
         processed = {
             "by_room": [],
             "timeline": [],
-            "total_consumption": 0.0
+            "reference_timeline": [],
+            "total_consumption": 0.0,
+            "total_source": "none",
         }
 
-        if "table" in raw_data and raw_data["table"]:
-            for room_data in raw_data["table"]:
-                room_info = {
-                    "room_name": room_data.get("raum", "Unknown"),
-                    "room_key": room_data.get("raumKey"),
-                    "device_number": room_data.get("gerNr"),
-                    "consumption": room_data.get("consumption", 0),
-                    "unit": room_data.get("unit", "KWH"),
-                    "consumption_evaluated": room_data.get("consumptionBew", 0),
-                    "evaluation_score": room_data.get("bewertung"),
-                    "reading": room_data.get("ablesung", 0),
-                    "initial_reading": room_data.get("anfangsstand", 0),
-                    # Note: Per-room timeline not available from API
-                }
-                processed["by_room"].append(room_info)
-                processed["total_consumption"] += room_data.get("consumption", 0)
+        if not isinstance(raw_data, dict):
+            logger.warning(f"{consumption_type}: unexpected response type "
+                           f"{type(raw_data).__name__}")
+            return processed
 
-        if "chart" in raw_data and raw_data["chart"]:
-            for entry in raw_data["chart"]:
-                if entry.get("keyFigure") != "REF":
-                    timeline_entry = {
-                        "period": entry.get("category"),
-                        "period_int": entry.get("categoryInt"),
-                        "value": entry.get("value", 0),
-                        "label": entry.get("label"),
-                        "num_values": entry.get("anzValues", 0)
-                    }
-                    processed["timeline"].append(timeline_entry)
+        def num(value, default=0.0):
+            try:
+                if value in (None, ""):
+                    return default
+                return float(str(value).replace(",", "."))
+            except (TypeError, ValueError):
+                return default
+
+        def first(mapping, *keys, default=None):
+            for k in keys:
+                v = mapping.get(k)
+                if v not in (None, ""):
+                    return v
+            return default
+
+        table = raw_data.get("table") or []
+        for room_data in table:
+            if not isinstance(room_data, dict):
+                continue
+
+            internal_key = room_data.get("internalKey")
+            device_number = first(
+                room_data, "gerNr", "geraeteNr", "geraetenummer", "zaehlerNr", "zaehlernummer"
+            )
+            if device_number is None and internal_key and ";" in str(internal_key):
+                device_number = str(internal_key).split(";")[-1].strip()
+
+            room_name = first(
+                room_data, "raum", "raumBez", "raumText", "bezeichnung",
+                "beschreibung", "description",
+            )
+            if room_name is None or str(room_name).strip() == str(device_number or "").strip():
+                room_name = first(room_data, "raum", "raumBez", "bezeichnung", default="Unknown")
+
+            consumption = num(first(room_data, "consumption", "verbrauch", default=0))
+
+            room_info = {
+                "room_name": str(room_name),
+                "room_key": first(room_data, "raumKey", "raumId"),
+                "device_number": device_number,
+                "internal_key": internal_key,
+                "consumption": consumption,
+                "unit": first(room_data, "unit", "einheit", "einheitText", default="KWH"),
+                "consumption_evaluated": num(first(room_data, "consumptionBew", "verbrauchBew", default=0)),
+                "evaluation_score": first(room_data, "bewertung", "bewertungsfaktor"),
+                "reading": num(first(room_data, "ablesung", "ablesungMax", "zaehlerstand", default=0)),
+                "initial_reading": num(first(room_data, "anfangsstand", "ablesungMin", default=0)),
+                # Note: Per-room timeline not available from API
+            }
+            processed["by_room"].append(room_info)
+            processed["total_consumption"] += consumption
+
+        if processed["by_room"]:
+            processed["total_source"] = "table"
+
+        for entry in raw_data.get("chart") or []:
+            if not isinstance(entry, dict):
+                continue
+            timeline_entry = {
+                "period": entry.get("category"),
+                "period_int": entry.get("categoryInt"),
+                "value": num(entry.get("value", 0)),
+                "label": entry.get("label"),
+                "num_values": entry.get("anzValues", 0),
+            }
+            is_ref = entry.get("keyFigure") == "REF" or entry.get("label") == "REF"
+            if is_ref:
+                processed["reference_timeline"].append(timeline_entry)
+            else:
+                processed["timeline"].append(timeline_entry)
+
+        # Fall back to the monthly chart when the portal gives no per-room table
+        # (observed for HEIZUNG with heat cost allocators).
+        if not processed["by_room"] and processed["timeline"]:
+            chart_total = sum(e["value"] for e in processed["timeline"])
+            if chart_total:
+                processed["total_consumption"] = chart_total
+                processed["total_source"] = "chart"
 
         return processed
 
