@@ -25,11 +25,38 @@ It uses a browser automation (Playwright) to log in securely and fetch the lates
 | `minol_email` | Your login email for the Minol portal. | - |
 | `minol_password` | Your login password. | - |
 | `mqtt_host` | Hostname of your broker. Use `core-mosquitto` for the internal add-on. | `core-mosquitto` |
-| `mqtt_port` | Port of your MQTT broker. | `1883` |
+| `mqtt_port` | Port of your MQTT broker. Use `1883` for plain TCP, `8883` for TLS. | `1883` |
 | `mqtt_user` | MQTT username (optional). | - |
 | `mqtt_password` | MQTT password (optional). | - |
+| `mqtt_tls` | Connect to the broker over TLS. Enable this when `mqtt_port` is `8883`. | `false` |
+| `mqtt_tls_insecure` | With `mqtt_tls`, skip certificate/hostname validation. Needed when the broker's certificate does not match the host you connect to (e.g. an internal name). | `false` |
 | `scan_interval_hours` | How often the data should be updated (in hours). | `12` |
+| `state_class` | Home Assistant `state_class` for the consumption sensors: `total` (a meter that can be corrected/reset), `total_increasing`, `measurement`, or `none`. Minol values are period totals that reset each billing period, so `total` is recommended over `total_increasing`. | `total` |
 | `log_level` | Logging verbosity (DEBUG, INFO, WARNING, ERROR). | `INFO` |
+
+### Connecting to a TLS-only broker
+
+If your Mosquitto broker only accepts encrypted connections (port `8883`), set:
+
+```yaml
+mqtt_host: core-mosquitto
+mqtt_port: 8883
+mqtt_tls: true
+mqtt_tls_insecure: true   # only if the broker cert is issued for a different hostname
+```
+
+With plain `mqtt_tls: true` the broker certificate is validated against `mqtt_host`;
+use `mqtt_tls_insecure: true` if that name is not on the certificate.
+
+### Units and heating data
+
+* Each meter is published with the unit the Minol portal reports for it. Warm-water
+  meters that are billed in kWh now appear as `kWh` / `energy` instead of `m³`.
+* Some heating installations (heat cost allocators) do not expose a per-room table
+  in kWh. The add-on retries in the meter's native units and, if that still returns
+  nothing, falls back to the monthly chart for the heating total. If the heating
+  sensor stays empty, run once with `log_level: DEBUG` and check the logged
+  `EM data response content (HEIZUNG)` line.
 
 ## Sensors
 

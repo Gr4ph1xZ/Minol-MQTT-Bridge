@@ -96,11 +96,14 @@ base_url: "https://webservices.minol.com"
 | `minol_email` | Yes | - | Your Minol portal login email |
 | `minol_password` | Yes | - | Your Minol portal password |
 | `mqtt_host` | Yes | - | MQTT broker hostname (use `core-mosquitto` for built-in broker) |
-| `mqtt_port` | No | 1883 | MQTT broker port |
+| `mqtt_port` | No | 1883 | MQTT broker port (`1883` plain, `8883` TLS) |
 | `mqtt_user` | Yes | - | MQTT username |
 | `mqtt_password` | Yes | - | MQTT password |
+| `mqtt_tls` | No | false | Connect to the broker over TLS (enable for port `8883`) |
+| `mqtt_tls_insecure` | No | false | With `mqtt_tls`, skip certificate/hostname validation |
 | `scan_interval_hours` | No | 12 | How often to fetch new data (in hours) |
 | `base_url` | No | https://webservices.minol.com | Minol portal base URL |
+| `state_class` | No | total | `state_class` for consumption sensors: `total`, `total_increasing`, `measurement`, `none` |
 
 ## Usage
 
