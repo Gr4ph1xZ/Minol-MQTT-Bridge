@@ -51,10 +51,11 @@ if config.get("base_url") is None:
     sys.exit(1)
 
 # state_class applied to the consumption sensors. "none" disables it entirely.
-# total_increasing is the default because Minol reports a billing-period-to-date
-# total that drops back to 0 each September: total_increasing reads that as a
-# meter reset and keeps the accumulated sum, whereas plain total books the drop
-# as a negative delta and loses a whole period from the long-term statistics.
+# total_increasing is the default because the connector measures consumption
+# from a fixed anchor rather than a sliding window, so the published totals only
+# ever grow - see MinolConnector.TIMELINE_ANCHOR. Should a meter ever be
+# exchanged, the reading restarts and total_increasing handles that as a meter
+# reset, whereas plain total would book it as a large negative delta.
 STATE_CLASS = (config.get("state_class") or "total_increasing").strip().lower()
 if STATE_CLASS in ("", "none", "null"):
     STATE_CLASS = None

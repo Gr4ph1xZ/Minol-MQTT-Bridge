@@ -72,6 +72,16 @@ class MinolConnector:
         "cold_water": False,
     }
 
+    # timelineStart for the consumption request. The portal has no notion of a
+    # billing period here: it reports 'anfangsstand' as the meter reading at the
+    # window start and 'consumption' as the difference to the window end, for
+    # exactly the window asked for. A window that slides with the clock would
+    # therefore yield a rolling sum that falls whenever a heavy month drops out
+    # of it, and Home Assistant reads such a fall as a meter reset. Anchoring
+    # the start far in the past makes the portal clamp to the earliest reading
+    # it holds, so consumption is measured from a fixed point and only grows.
+    TIMELINE_ANCHOR = "200001"
+
     def __init__(self, email: str, password: str, base_url: str = "https://webservices.minol.com"):
         """Initialize the connector with user credentials."""
         self.email = email
@@ -351,7 +361,7 @@ class MinolConnector:
                      f"{max_retries} attempts: {last_error}")
         raise last_error or RuntimeError(f"EM data fetch failed for {cons_type}")
 
-    def get_all_consumption_data(self, timeline_start, timeline_end):
+    def get_all_consumption_data(self, timeline_start, timeline_end, history_months=None):
         """
         Fetch all consumption data types (heating, hot water, cold water) organized by room.
 
@@ -402,6 +412,9 @@ class MinolConnector:
                 processed = self._fetch_category(
                     key, dlg_key, timeline_start, timeline_end
                 )
+                # After the total is settled, so trimming only affects the
+                # monthly breakdown and the DIN comparison.
+                self._trim_timeline(processed, history_months)
 
                 if not processed["by_room"] and processed.get("total_source") != "chart":
                     logger.warning(
@@ -461,6 +474,23 @@ class MinolConnector:
         return empty if empty is not None else self._process_consumption_data(
             {}, self.CONS_TYPES[key][0], timeline_start, timeline_end
         )
+
+    @staticmethod
+    def _trim_timeline(processed, history_months):
+        """
+        Keep only the most recent `history_months` entries of the monthly chart.
+
+        The request is anchored far in the past so that the total is measured
+        from a fixed point, which makes the chart span the whole tenancy. The
+        total has already been derived by the time this runs, so trimming only
+        narrows what is published as the monthly breakdown and what the DIN
+        comparison is calculated over - both of which are about recent
+        behaviour rather than everything on record.
+        """
+        if not history_months or history_months <= 0:
+            return
+        processed["timeline"] = processed["timeline"][-history_months:]
+        processed["reference_timeline"] = processed["reference_timeline"][-history_months:]
 
     @staticmethod
     def _cons_type_understood(raw_data, cons_type):
@@ -626,8 +656,12 @@ class MinolConnector:
         """
         Fetch all consumption data (heating, hot water, cold water) with caching.
 
+        The totals always cover everything the portal holds, measured from a
+        fixed anchor so they only ever grow; `months_back` narrows the monthly
+        breakdown that goes out as sensor attributes, not the totals.
+
         Args:
-            months_back: Number of months of historical data to fetch (default: 12)
+            months_back: Months of monthly history to keep (default: 12)
             force_update: Force data refresh even if cached data exists
 
         Returns:
@@ -644,15 +678,16 @@ class MinolConnector:
                 return None
 
         try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=30 * months_back)
+            timeline_start = self.TIMELINE_ANCHOR
+            timeline_end = datetime.now().strftime("%Y%m")
 
-            timeline_start = start_date.strftime("%Y%m")
-            timeline_end = end_date.strftime("%Y%m")
+            logger.info(f"Fetching consumption data from {timeline_start} to "
+                        f"{timeline_end} (portal clamps to the earliest reading "
+                        f"it holds), keeping {months_back} months of history")
 
-            logger.info(f"Fetching consumption data from {timeline_start} to {timeline_end}")
-
-            data = self.get_all_consumption_data(timeline_start, timeline_end)
+            data = self.get_all_consumption_data(
+                timeline_start, timeline_end, history_months=months_back
+            )
             self._last_data = data
             self._last_update = datetime.now()
 

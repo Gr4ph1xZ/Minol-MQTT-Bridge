@@ -4,13 +4,21 @@
 
 ### Breaking
 
-- **`state_class` now defaults to `total_increasing`** (was `total`). Minol
-  reports a billing-period-to-date total that drops to 0 at the period rollover:
-  `total_increasing` reads that as a meter reset and keeps the accumulated sum,
-  while `total` books it as a negative delta and loses a whole period from the
-  long-term statistics. Set `state_class: total` explicitly to keep the old
-  behaviour. Home Assistant may ask you to fix the statistics once after the
-  change.
+- **Consumption is now measured from a fixed anchor instead of a sliding
+  12-month window.** The portal reports consumption for exactly the window
+  requested — `anfangsstand` is the meter reading at the window start and
+  `consumption` the difference to the end — with no billing-period anchoring of
+  any kind. Asking for "the last 12 months" on every run therefore produced a
+  rolling sum that *falls* whenever a high-consumption month drops out of the
+  window. The window now starts far in the past and the portal clamps it to the
+  earliest reading it holds, so the totals only ever grow. **Sensor values step
+  up once**, from consumption over the trailing 12 months to consumption since
+  the first reading the portal holds for the meter. `scan_interval_hours` is
+  unaffected; `months_back` now governs only the `monthly_data` attribute.
+- **`state_class` now defaults to `total_increasing`** (was `total`), which is
+  correct for the monotonic totals above and is what the Energy Dashboard wants.
+  Set `state_class: total` explicitly to keep the old behaviour. Home Assistant
+  may ask you to fix the statistics once after the change.
 
 ### Added
 
@@ -39,8 +47,8 @@
 - A meter row that carries no consumption field is no longer published as `0`.
   It used to be indistinguishable from a meter that genuinely consumed nothing,
   and under `total_increasing` a spurious `0` reads as a meter reset, so the
-  recovery back to the real figure is booked as fresh consumption and the
-  billing period is counted twice.
+  recovery back to the real figure is booked as fresh consumption and counted
+  twice.
 
 ### Changed
 

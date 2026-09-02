@@ -64,20 +64,26 @@ use `mqtt_tls_insecure: true` if that name is not on the certificate.
 
 ### State class and the Energy Dashboard
 
-Minol reports a **billing-period-to-date total** that drops back to 0 when the
-period rolls over (September for most contracts). `total_increasing` reads that
-drop as a meter reset, keeps the accumulated long-term sum and starts adding
-again — which is what the Energy Dashboard needs. Plain `total` instead books
-the drop as a negative delta and quietly loses a whole billing period from the
-statistics, so it is no longer the default.
+The portal has no notion of a billing period in this API. It reports the meter
+reading at the start of the window you ask for, the reading at the end, and the
+difference — so the answer depends entirely on the window requested.
+
+The add-on therefore anchors the start of that window far in the past and lets
+the portal clamp to the earliest reading it holds. Consumption is then measured
+from a fixed point and **only ever grows**, which is exactly what
+`total_increasing` and the Energy Dashboard expect. (A window that slid with the
+clock — say, always the last 12 months — would instead fall whenever a
+high-consumption month dropped out of it, and Home Assistant would read that
+fall as a meter reset and double-count.)
 
 The sensors can be added to **Settings → Dashboards → Energy** directly; no
 template sensors or filtering are needed in between.
 
-The trade-off of `total_increasing` is that any drop counts as a reset, so a
-value of 0 that is *not* a real period rollover would make Home Assistant book
-the recovery as fresh consumption and double-count the period. The add-on
-therefore never publishes a placeholder 0:
+The trade-off of `total_increasing` is that any drop counts as a meter reset. On
+a monotonic series the only legitimate drop is a meter exchange, which is
+genuinely a reset. But it also means a spurious 0 would make Home Assistant book
+the recovery as fresh consumption and double-count. The add-on therefore never
+publishes a placeholder 0:
 
 * a failed login or a failed category leaves the retained value untouched
 * a meter row that carries no consumption field at all is skipped rather than
