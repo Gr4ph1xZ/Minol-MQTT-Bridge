@@ -14,7 +14,7 @@
   earliest reading it holds, so the totals only ever grow. **Sensor values step
   up once**, from consumption over the trailing 12 months to consumption since
   the first reading the portal holds for the meter. `scan_interval_hours` is
-  unaffected; `months_back` now governs only the `monthly_data` attribute.
+  unaffected, and the `monthly_data` attribute still covers the last 12 months.
 - **`state_class` now defaults to `total_increasing`** (was `total`), which is
   correct for the monotonic totals above and is what the Energy Dashboard wants.
   Set `state_class: total` explicitly to keep the old behaviour. Home Assistant
@@ -82,11 +82,21 @@
 
 ### Upgrading
 
-Hot water changes unit from `kWh` to `m³`. Home Assistant will flag a unit
-mismatch against the recorded long-term statistics. Fix it once in
-**Developer Tools → Statistics**: find `sensor.minol_hot_water_*` and use
-*Fix issue* (or delete the statistics). The underlying numbers do not change —
-only the unit they are labelled with.
+Three things change at once for existing installations, and Home Assistant will
+flag each of them against the recorded long-term statistics:
+
+1. **Every total steps up**, from consumption over the trailing 12 months to
+   consumption since the first reading the portal holds.
+2. **Hot water changes unit** from `kWh` to `m³`. Here the number really is
+   unchanged in substance — it was always a volume, just labelled as energy.
+3. **`state_class` changes** from `total` to `total_increasing`.
+
+Fix them in one pass: **Developer Tools → Statistics**, find the
+`sensor.minol_*` entities and use *Fix issue* (or delete the statistics). Doing
+all three together is much less work than meeting them one at a time.
+
+Any Home Assistant template sensors that were filtering zeros or deriving
+availability for these entities should no longer be needed.
 
 ## 1.1.0
 

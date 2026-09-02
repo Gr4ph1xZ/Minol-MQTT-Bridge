@@ -103,14 +103,17 @@ base_url: "https://webservices.minol.com"
 | `mqtt_tls_insecure` | No | false | With `mqtt_tls`, skip certificate/hostname validation |
 | `scan_interval_hours` | No | 12 | How often to fetch new data (in hours) |
 | `base_url` | No | https://webservices.minol.com | Minol portal base URL |
-| `state_class` | No | total | `state_class` for consumption sensors: `total`, `total_increasing`, `measurement`, `none` |
+| `state_class` | No | total_increasing | `state_class` for consumption sensors: `total_increasing`, `total`, `measurement`, `none` |
+| `log_level` | No | INFO | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
+| `dry_run` | No | false | Fetch from the portal but publish nothing; dump what would have been published to JSON and exit |
+| `dry_run_output` | No | `minol_dry_run.json` | Where the dry-run JSON is written |
 
 ## Usage
 
 Once configured and started, the add-on will:
 
 1. Authenticate with the Minol portal using your credentials
-2. Fetch consumption data for the past 12 months
+2. Fetch consumption since the earliest reading the portal holds (the monthly breakdown covers the last 12 months)
 3. Create Home Assistant sensors automatically via MQTT discovery
 4. Update sensors according to the configured interval
 
@@ -119,12 +122,12 @@ Once configured and started, the add-on will:
 The add-on creates the following sensors in Home Assistant:
 
 #### Total Consumption Sensors
-- `sensor.minol_heating_total` - Total heating consumption (kWh)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp, `cons_type` (the portal key the data came from), `total_source` (`table` or `chart`)
-- `sensor.minol_hot_water_total` - Total hot water consumption (m³)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp, `cons_type` (the portal key the data came from), `total_source` (`table` or `chart`)
-- `sensor.minol_cold_water_total` - Total cold water consumption (m³)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp, `cons_type` (the portal key the data came from), `total_source` (`table` or `chart`)
+- `sensor.minol_heating_total` - Heating consumption since the first reading on record (kWh)
+  - **Attributes**: `monthly_data` (last 12 months), `monthly_data_period`, `monthly_data_sum`, `total_period` (what the state covers), DIN comparison %, `cons_type` (the portal key used), `total_source` (`table` or `chart`), last update timestamp
+- `sensor.minol_hot_water_total` - Hot water consumption since the first reading on record (m³)
+  - **Attributes**: `monthly_data` (last 12 months), `monthly_data_period`, `monthly_data_sum`, `total_period` (what the state covers), DIN comparison %, `cons_type` (the portal key used), `total_source` (`table` or `chart`), last update timestamp
+- `sensor.minol_cold_water_total` - Cold water consumption since the first reading on record (m³)
+  - **Attributes**: `monthly_data` (last 12 months), `monthly_data_period`, `monthly_data_sum`, `total_period` (what the state covers), DIN comparison %, `cons_type` (the portal key used), `total_source` (`table` or `chart`), last update timestamp
 
 #### Per-Device/Room Sensors
 - `sensor.minol_<room>_<type>_<device_id>` - One sensor per device

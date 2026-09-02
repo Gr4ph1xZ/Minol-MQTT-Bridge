@@ -27,7 +27,7 @@ def load_config():
             "mqtt_password": os.environ.get("MQTT_PASSWORD"),
             "mqtt_tls": os.environ.get("MQTT_TLS", "false").lower() == "true",
             "mqtt_tls_insecure": os.environ.get("MQTT_TLS_INSECURE", "false").lower() == "true",
-            "scan_interval_hours": 6,
+            "scan_interval_hours": int(os.environ.get("SCAN_INTERVAL_HOURS", 12)),
             "base_url": os.environ.get("BASE_URL"),
             "state_class": os.environ.get("STATE_CLASS", "total_increasing"),
             "log_level": os.environ.get("LOG_LEVEL", "INFO"),
@@ -91,10 +91,20 @@ def ha_unit(raw, default=None):
 
 
 def ha_device_class(raw, default=None):
-    """Derive a Home Assistant device_class from a Minol unit string."""
+    """
+    Derive a Home Assistant device_class from a Minol unit string.
+
+    A unit that is present but unrecognised gets no device_class at all. Heat
+    cost allocators report dimensionless allocator units, and claiming
+    device_class 'energy' alongside a unit Home Assistant does not accept as
+    energy makes it reject the entity outright. The default only applies when
+    the portal gave no unit to go on.
+    """
     key = (raw or "").strip().upper()
     if key in _UNIT_MAP:
         return _UNIT_MAP[key][1]
+    if key:
+        return None
     return default
 
 
@@ -247,6 +257,16 @@ def publish_attributes(unique_id, attributes):
 def _category_unit(data, category_key, default_unit, default_device_class):
     """Pick the HA unit/device_class for an aggregate sensor from its first meter."""
     rooms = (data.get(category_key) or {}).get("by_room") or []
+    units = {(room.get("unit") or "").strip().upper() for room in rooms if room.get("unit")}
+    if len(units) > 1:
+        # total_consumption adds the meters up regardless, so the aggregate is
+        # only meaningful while they agree. Never seen in practice - say so
+        # loudly rather than publishing a number with no defensible unit.
+        logger.error(
+            f"'{category_key}' meters report mixed units {sorted(units)}; the "
+            f"category total adds them together and is not trustworthy - use "
+            f"the per-meter sensors instead"
+        )
     for room in rooms:
         raw = room.get("unit")
         if raw:

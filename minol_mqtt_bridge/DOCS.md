@@ -52,17 +52,21 @@ use `mqtt_tls_insecure: true` if that name is not on the certificate.
 
 ### Units
 
-* Heating is published in `kWh` (`device_class: energy`).
+* Heat meters reporting kWh are published in `kWh` (`device_class: energy`).
 * Hot and cold water are published in `m³` (`device_class: water`).
+* Heat cost allocators report dimensionless allocator units. Those are passed
+  through as-is with **no** `device_class`, because Home Assistant only accepts
+  a device class alongside a unit it recognises. Such sensors still record
+  history, but they cannot go on the Energy Dashboard — allocator units are not
+  energy.
 
 > **Note for users upgrading from 1.1.0 or earlier:** hot water used to be
 > published as `kWh`. That was wrong — the value was the meter's m³ reading
 > carrying an energy unit, because the portal relabels the unit when asked to
 > convert to kWh but does not convert that particular field. Hot water is now
-> requested in its native m³ and the numbers are unchanged, only correctly
-> labelled. Home Assistant will refuse the new unit for the existing
-> statistics, so delete the old ones once: **Developer Tools → Statistics**,
-> find `sensor.minol_hot_water_*`, and use *Fix issue* / delete.
+> requested in its native m³, so that particular number is unchanged in
+> substance and only correctly labelled. Note that **all** totals do change
+> value in 1.2.0 for a separate reason — see the changelog's upgrade notes.
 
 ### Dry run
 
@@ -152,8 +156,6 @@ file to accept the new set.
 
 > **Tip:** the per-meter sensors are inherently more robust than the category
 > totals for the Energy Dashboard, which sums multiple sources for you anyway.
-
-
 
 ### How the heating meter is detected
 
