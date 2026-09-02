@@ -544,7 +544,13 @@ class MinolConnector:
             if room_name is None or str(room_name).strip() == str(device_number or "").strip():
                 room_name = first(room_data, "raum", "raumBez", "bezeichnung", default="Unknown")
 
-            consumption = num(first(room_data, "consumption", "verbrauch", default=0))
+            # Distinguish "the meter consumed 0" from "the row carried no
+            # consumption field at all". Both used to read as 0.0, and a
+            # spurious 0 looks like a meter reset to Home Assistant's
+            # total_increasing handling, which then books the recovery as fresh
+            # consumption and permanently double-counts the billing period.
+            reported = first(room_data, "consumption", "verbrauch")
+            consumption = num(reported, 0.0)
 
             room_info = {
                 "room_name": str(room_name),
@@ -552,6 +558,7 @@ class MinolConnector:
                 "device_number": device_number,
                 "internal_key": internal_key,
                 "consumption": consumption,
+                "consumption_reported": reported is not None,
                 "unit": first(room_data, "unit", "einheit", "einheitText", default="KWH"),
                 "consumption_evaluated": num(first(room_data, "consumptionBew", "verbrauchBew", default=0)),
                 "evaluation_score": first(room_data, "bewertung", "bewertungsfaktor"),

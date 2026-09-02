@@ -2,6 +2,23 @@
 
 ## 1.2.0
 
+### Breaking
+
+- **`state_class` now defaults to `total_increasing`** (was `total`). Minol
+  reports a billing-period-to-date total that drops to 0 at the period rollover:
+  `total_increasing` reads that as a meter reset and keeps the accumulated sum,
+  while `total` books it as a negative delta and loses a whole period from the
+  long-term statistics. Set `state_class: total` explicitly to keep the old
+  behaviour. Home Assistant may ask you to fix the statistics once after the
+  change.
+
+### Added
+
+- An availability topic (`minol/status`) published with an MQTT Last Will, and
+  referenced by every discovered sensor. If the add-on stops or loses the
+  broker, the sensors go **unavailable** instead of leaving the last retained
+  reading looking current — no template sensors needed to detect staleness.
+
 ### Fixed
 
 - **Heating sensors stayed empty on installations with a kWh heat meter.**
@@ -19,6 +36,11 @@
 - Responses for an unrecognised consumption key are now discarded. The portal
   does not reject an unknown key; it silently returns *every* category at once,
   which would have folded water meters into the heating total.
+- A meter row that carries no consumption field is no longer published as `0`.
+  It used to be indistinguishable from a meter that genuinely consumed nothing,
+  and under `total_increasing` a spurious `0` reads as a meter reset, so the
+  recovery back to the real figure is booked as fresh consumption and the
+  billing period is counted twice.
 
 ### Changed
 

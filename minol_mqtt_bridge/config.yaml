@@ -20,7 +20,7 @@ options:
   mqtt_tls_insecure: false
   scan_interval_hours: 12
   base_url: "https://webservices.minol.com"
-  state_class: "total"
+  state_class: "total_increasing"
   log_level: "INFO"
 schema:
   minol_email: str

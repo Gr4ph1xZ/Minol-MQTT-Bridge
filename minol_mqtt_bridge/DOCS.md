@@ -31,7 +31,7 @@ It uses a browser automation (Playwright) to log in securely and fetch the lates
 | `mqtt_tls` | Connect to the broker over TLS. Enable this when `mqtt_port` is `8883`. | `false` |
 | `mqtt_tls_insecure` | With `mqtt_tls`, skip certificate/hostname validation. Needed when the broker's certificate does not match the host you connect to (e.g. an internal name). | `false` |
 | `scan_interval_hours` | How often the data should be updated (in hours). | `12` |
-| `state_class` | Home Assistant `state_class` for the consumption sensors: `total` (a meter that can be corrected/reset), `total_increasing`, `measurement`, or `none`. Minol values are period totals that reset each billing period, so `total` is recommended over `total_increasing`. | `total` |
+| `state_class` | Home Assistant `state_class` for the consumption sensors: `total_increasing`, `total`, `measurement`, or `none`. See [State class and the Energy Dashboard](#state-class-and-the-energy-dashboard). | `total_increasing` |
 | `log_level` | Logging verbosity (DEBUG, INFO, WARNING, ERROR). | `INFO` |
 
 ### Connecting to a TLS-only broker
@@ -61,6 +61,30 @@ use `mqtt_tls_insecure: true` if that name is not on the certificate.
 > labelled. Home Assistant will refuse the new unit for the existing
 > statistics, so delete the old ones once: **Developer Tools → Statistics**,
 > find `sensor.minol_hot_water_*`, and use *Fix issue* / delete.
+
+### State class and the Energy Dashboard
+
+Minol reports a **billing-period-to-date total** that drops back to 0 when the
+period rolls over (September for most contracts). `total_increasing` reads that
+drop as a meter reset, keeps the accumulated long-term sum and starts adding
+again — which is what the Energy Dashboard needs. Plain `total` instead books
+the drop as a negative delta and quietly loses a whole billing period from the
+statistics, so it is no longer the default.
+
+The sensors can be added to **Settings → Dashboards → Energy** directly; no
+template sensors or filtering are needed in between.
+
+The trade-off of `total_increasing` is that any drop counts as a reset, so a
+value of 0 that is *not* a real period rollover would make Home Assistant book
+the recovery as fresh consumption and double-count the period. The add-on
+therefore never publishes a placeholder 0:
+
+* a failed login or a failed category leaves the retained value untouched
+* a meter row that carries no consumption field at all is skipped rather than
+  published as 0 (look for `reported no consumption value` in the log)
+* the add-on publishes an availability topic (`minol/status`) with an MQTT Last
+  Will, so if it stops or loses the broker the sensors go **unavailable** rather
+  than showing a stale reading as if it were current
 
 ### How the heating meter is detected
 

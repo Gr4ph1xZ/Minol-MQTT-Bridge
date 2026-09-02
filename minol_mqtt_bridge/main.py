@@ -28,7 +28,7 @@ def load_config():
             "mqtt_tls_insecure": os.environ.get("MQTT_TLS_INSECURE", "false").lower() == "true",
             "scan_interval_hours": 6,
             "base_url": os.environ.get("BASE_URL"),
-            "state_class": os.environ.get("STATE_CLASS", "total"),
+            "state_class": os.environ.get("STATE_CLASS", "total_increasing"),
             "log_level": os.environ.get("LOG_LEVEL", "INFO")
         }
 
@@ -51,7 +51,11 @@ if config.get("base_url") is None:
     sys.exit(1)
 
 # state_class applied to the consumption sensors. "none" disables it entirely.
-STATE_CLASS = (config.get("state_class") or "total").strip().lower()
+# total_increasing is the default because Minol reports a billing-period-to-date
+# total that drops back to 0 each September: total_increasing reads that as a
+# meter reset and keeps the accumulated sum, whereas plain total books the drop
+# as a negative delta and loses a whole period from the long-term statistics.
+STATE_CLASS = (config.get("state_class") or "total_increasing").strip().lower()
 if STATE_CLASS in ("", "none", "null"):
     STATE_CLASS = None
 
@@ -82,6 +86,14 @@ def ha_device_class(raw, default=None):
     return default
 
 
+# Liveness for every sensor. Registered as the MQTT Last Will before
+# connecting, so the broker marks the add-on offline by itself if the container
+# dies or the network drops - Home Assistant then shows the sensors as
+# unavailable instead of leaving the last retained reading looking current.
+AVAILABILITY_TOPIC = "minol/status"
+PAYLOAD_AVAILABLE = "online"
+PAYLOAD_NOT_AVAILABLE = "offline"
+
 mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
 if config.get("mqtt_user") and config.get("mqtt_password"):
@@ -107,6 +119,11 @@ def _on_connect(client, userdata, flags, reason_code, properties=None):
     if reason_code == 0 or getattr(reason_code, "is_failure", False) is False:
         logger.info(f"Connected to MQTT broker {config['mqtt_host']}:{config['mqtt_port']} "
                     f"(tls={bool(config.get('mqtt_tls'))})")
+        # Re-announce on every (re)connect, since the broker may have published
+        # the Last Will in the meantime. Sent through the raw client rather than
+        # _publish(): this runs on the network thread, and waiting there for the
+        # publish to round-trip would deadlock.
+        client.publish(AVAILABILITY_TOPIC, PAYLOAD_AVAILABLE, qos=1, retain=True)
         _connected.set()
     else:
         logger.error(f"MQTT connection refused: {reason_code}")
@@ -125,6 +142,7 @@ mqtt_client.on_disconnect = _on_disconnect
 def connect_mqtt():
     """Connect to the MQTT broker and block until the connection is confirmed."""
     mqtt_client.reconnect_delay_set(min_delay=1, max_delay=60)
+    mqtt_client.will_set(AVAILABILITY_TOPIC, PAYLOAD_NOT_AVAILABLE, qos=1, retain=True)
     try:
         mqtt_client.connect(config["mqtt_host"], int(config["mqtt_port"]), keepalive=60)
     except Exception as e:
@@ -167,6 +185,9 @@ def publish_discovery_config(sensor_type, unique_id, name, unit, icon, device_cl
         "state_topic": f"minol/{unique_id}/state",
         "icon": icon,
         "platform": "mqtt",
+        "availability_topic": AVAILABILITY_TOPIC,
+        "payload_available": PAYLOAD_AVAILABLE,
+        "payload_not_available": PAYLOAD_NOT_AVAILABLE,
         "device": {
             "identifiers": ["minol_account"],
             "name": "Minol Customer Portal",
@@ -214,7 +235,11 @@ def _category_has_data(data, category_key):
     cat = data.get(category_key) or {}
     if "error" in cat:
         return False
-    if cat.get("by_room"):
+    # Only trust meters that actually reported a consumption field. A row
+    # without one totals to 0, and under state_class total_increasing a
+    # spurious 0 reads as a meter reset, so the recovery back to the real
+    # figure is booked as fresh consumption and the period is counted twice.
+    if any(room.get("consumption_reported") for room in cat.get("by_room") or []):
         return True
     for entry in cat.get("timeline", []) or []:
         try:
@@ -429,7 +454,13 @@ def run_sync():
                 device_class,
                 attributes_topic=f"minol/{uid}/attributes"
             )
-            publish_state(uid, val)
+            if room.get("consumption_reported"):
+                publish_state(uid, val)
+            else:
+                logger.warning(
+                    f"Meter {uid} reported no consumption value - leaving its "
+                    f"state unchanged instead of publishing 0"
+                )
             publish_attributes(uid, extended_attrs)
 
     process_rooms_extended("heating", "Heating", "kWh", "mdi:radiator", "energy")
