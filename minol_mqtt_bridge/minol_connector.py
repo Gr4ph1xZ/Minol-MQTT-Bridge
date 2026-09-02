@@ -50,6 +50,11 @@ class MinolConnector:
     # for heat meters reporting kWh (dlg "100KWH"). An account only ever has
     # one of them - the portal accepts the other but answers with an empty
     # table and a chart holding nothing but the DIN reference curve.
+    #
+    # "HEIZUNG" is tried first because it is what the portal's own UI5 app
+    # (monitoring/Component.js) seeds its filter model with; that app then
+    # replaces it with whatever the account actually has. Probing is the only
+    # way to learn that from outside - no endpoint reports it.
     CONS_TYPES = {
         "heating": ("HEIZUNG", "HZKWH"),
         "hot_water": ("WARMWASSER",),
@@ -446,7 +451,10 @@ class MinolConnector:
                             f"total {processed['total_consumption']})")
                 return processed
 
-            logger.info(f"{key}: consType={cons_type} accepted but carries no values")
+            # Expected: an account has meters under exactly one of the keys, so
+            # the others are silently skipped. If none match, the caller logs a
+            # warning naming every key that was tried.
+            logger.debug(f"{key}: consType={cons_type} accepted but carries no values")
             if empty is None:
                 empty = processed
 
