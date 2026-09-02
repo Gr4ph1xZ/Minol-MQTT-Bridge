@@ -5,6 +5,7 @@ import ssl
 import logging
 import sys
 import threading
+from datetime import datetime
 import paho.mqtt.client as mqtt
 from minol_connector import MinolConnector
 
@@ -29,7 +30,9 @@ def load_config():
             "scan_interval_hours": 6,
             "base_url": os.environ.get("BASE_URL"),
             "state_class": os.environ.get("STATE_CLASS", "total_increasing"),
-            "log_level": os.environ.get("LOG_LEVEL", "INFO")
+            "log_level": os.environ.get("LOG_LEVEL", "INFO"),
+            "dry_run": os.environ.get("DRY_RUN", "false").lower() == "true",
+            "dry_run_output": os.environ.get("DRY_RUN_OUTPUT", ""),
         }
 
 
@@ -49,6 +52,14 @@ logger.info(f"Log level set to: {log_level_str}")
 if config.get("base_url") is None:
     logger.error("No base_url configured, aborting")
     sys.exit(1)
+
+# Dry run: fetch from the portal exactly as normal, but connect to no broker and
+# write every message that would have been published to a JSON file instead.
+# Runs one cycle and exits, so it is safe to point at a live account while
+# working on the code. Enable with --dry-run, DRY_RUN=true, or the add-on option.
+DRY_RUN = "--dry-run" in sys.argv or bool(config.get("dry_run"))
+DRY_RUN_PATH = config.get("dry_run_output") or "minol_dry_run.json"
+_dry_run_messages = []
 
 # state_class applied to the consumption sensors. "none" disables it entirely.
 # total_increasing is the default because the connector measures consumption
@@ -164,6 +175,18 @@ def connect_mqtt():
 def _publish(topic, payload, retain=True):
     """Publish a single MQTT message and log/track delivery failures."""
     global _publish_failures
+
+    if DRY_RUN:
+        # Keep JSON payloads structured so the dump stays readable rather than
+        # a wall of escaped strings.
+        try:
+            body = json.loads(payload)
+        except (TypeError, ValueError):
+            body = payload
+        _dry_run_messages.append({"topic": topic, "retain": retain, "payload": body})
+        logger.info(f"[dry-run] would publish {topic}")
+        return
+
     info = mqtt_client.publish(topic, payload, qos=1, retain=retain)
     try:
         info.wait_for_publish(timeout=10)
@@ -261,7 +284,7 @@ def run_sync():
     global _publish_failures
     _publish_failures = 0
 
-    if not _connected.is_set():
+    if not DRY_RUN and not _connected.is_set():
         logger.error("MQTT not connected; skipping this sync cycle")
         return
 
@@ -505,13 +528,49 @@ def run_sync():
     publish_din_comparison("hot_water", "Hot Water")
     publish_din_comparison("cold_water", "Cold Water")
 
-    if _publish_failures:
+    if DRY_RUN:
+        logger.info(f"Dry run collected {len(_dry_run_messages)} MQTT message(s)")
+    elif _publish_failures:
         logger.error(f"Sync finished with {_publish_failures} failed MQTT publish(es)")
     else:
         logger.info("Data published to MQTT successfully with all enhancements!")
 
+    return data
+
+
+def write_dry_run(data, path):
+    """
+    Write everything a normal cycle would have published to a JSON file.
+
+    Holds both the consumption data as the connector parsed it and the exact
+    MQTT messages that would have gone out, so a sensor's value can be traced
+    back to the portal figure it came from without a broker in the loop.
+
+    Deliberately excludes credentials, but the readings, meter numbers and room
+    names are real - scrub before attaching it to a bug report.
+    """
+    payload = {
+        "generated_at": datetime.now().isoformat(),
+        "settings": {
+            "base_url": config.get("base_url"),
+            "state_class": STATE_CLASS,
+            "scan_interval_hours": config.get("scan_interval_hours"),
+        },
+        "consumption_data": data,
+        "mqtt_messages": _dry_run_messages,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+    logger.info(f"Dry run written to {os.path.abspath(path)}")
+
 
 if __name__ == "__main__":
+    if DRY_RUN:
+        logger.info("DRY RUN - no MQTT connection will be made, one cycle only")
+        data = run_sync()
+        write_dry_run(data, DRY_RUN_PATH)
+        sys.exit(0 if data else 1)
+
     connect_mqtt()
 
     while True:

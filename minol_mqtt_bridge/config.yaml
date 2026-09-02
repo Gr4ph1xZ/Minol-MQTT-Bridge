@@ -22,6 +22,8 @@ options:
   base_url: "https://webservices.minol.com"
   state_class: "total_increasing"
   log_level: "INFO"
+  dry_run: false
+  dry_run_output: ""
 schema:
   minol_email: str
   minol_password: str
@@ -35,3 +37,5 @@ schema:
   base_url: str
   state_class: list(total|total_increasing|measurement|none)
   log_level: list(DEBUG|INFO|WARNING|ERROR|CRITICAL)
+  dry_run: bool?
+  dry_run_output: str?

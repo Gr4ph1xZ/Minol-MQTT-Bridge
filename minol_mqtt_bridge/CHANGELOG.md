@@ -22,6 +22,11 @@
 
 ### Added
 
+- A **dry run** mode (`--dry-run`, `DRY_RUN=true`, or the `dry_run` option) that
+  fetches from the portal but opens no MQTT connection, writes every message it
+  would have published to a JSON file, and exits after one cycle. Needs no
+  broker settings, so a sensor can be investigated against a live account
+  without touching the broker. Output path is `dry_run_output`.
 - An availability topic (`minol/status`) published with an MQTT Last Will, and
   referenced by every discovered sensor. If the add-on stops or loses the
   broker, the sensors go **unavailable** instead of leaving the last retained

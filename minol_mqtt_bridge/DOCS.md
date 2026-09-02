@@ -33,6 +33,8 @@ It uses a browser automation (Playwright) to log in securely and fetch the lates
 | `scan_interval_hours` | How often the data should be updated (in hours). | `12` |
 | `state_class` | Home Assistant `state_class` for the consumption sensors: `total_increasing`, `total`, `measurement`, or `none`. See [State class and the Energy Dashboard](#state-class-and-the-energy-dashboard). | `total_increasing` |
 | `log_level` | Logging verbosity (DEBUG, INFO, WARNING, ERROR). | `INFO` |
+| `dry_run` | Fetch from the portal but publish nothing; write what *would* have been published to a JSON file and exit. See [Dry run](#dry-run). | `false` |
+| `dry_run_output` | Where the dry-run JSON goes. Empty means `minol_dry_run.json` in the working directory. | `""` |
 
 ### Connecting to a TLS-only broker
 
@@ -61,6 +63,46 @@ use `mqtt_tls_insecure: true` if that name is not on the certificate.
 > labelled. Home Assistant will refuse the new unit for the existing
 > statistics, so delete the old ones once: **Developer Tools → Statistics**,
 > find `sensor.minol_hot_water_*`, and use *Fix issue* / delete.
+
+### Dry run
+
+To see what the add-on would publish without touching your broker — useful when
+a sensor looks wrong, or when working on the code — run it with `--dry-run`:
+
+```bash
+export MINOL_EMAIL="you@example.com"
+export MINOL_PASSWORD="..."
+export BASE_URL="https://webservices.minol.com"
+
+python3 main.py --dry-run
+```
+
+No MQTT connection is opened, so no broker settings are needed at all. One
+fetch cycle runs and the result is written to `minol_dry_run.json`:
+
+```json
+{
+  "generated_at": "...",
+  "settings": { "base_url": "...", "state_class": "total_increasing" },
+  "consumption_data": { "heating": { "by_room": [...], "cons_type": "HZKWH" } },
+  "mqtt_messages": [
+    { "topic": "minol/heating_total/state", "retain": true, "payload": "..." },
+    { "topic": "homeassistant/sensor/minol/heating_total/config", "...": "..." }
+  ]
+}
+```
+
+`mqtt_messages` is every message a normal cycle would have sent, in order, with
+JSON payloads kept structured rather than escaped — so a sensor value can be
+traced straight back to the portal figure it came from. Exit status is 0 when
+data was fetched, 1 when it was not.
+
+The same thing is available as the `dry_run` add-on option for debugging an
+installation from the Home Assistant UI. Set it back to `false` afterwards, or
+the add-on will never publish.
+
+> The dump contains no credentials, but it does contain your meter readings,
+> meter numbers and room names. Scrub it before attaching it to a bug report.
 
 ### State class and the Energy Dashboard
 
