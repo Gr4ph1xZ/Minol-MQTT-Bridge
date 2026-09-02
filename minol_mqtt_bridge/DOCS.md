@@ -133,6 +133,27 @@ publishes a placeholder 0:
 * the add-on publishes an availability topic (`minol/status`) with an MQTT Last
   Will, so if it stops or loses the broker the sensors go **unavailable** rather
   than showing a stale reading as if it were current
+* a category total is never published from a partial set of meters — see below
+
+### Category totals and partial responses
+
+A category total is the sum over the meters the portal returned, so a response
+that omits one meter would silently lower it. Under `total_increasing` that
+looks like a meter reset, and Home Assistant books the whole remaining value as
+fresh consumption — a spike worth the rest of the category.
+
+The add-on remembers which meters it has seen (`minol_known_meters.json`, in
+`/data` for the add-on) and **skips the category total** when a previously seen
+meter is missing, logging which one. Per-meter sensors are unaffected: a missing
+meter is simply not republished, so it keeps its last value.
+
+If a meter is genuinely gone — removed, or replaced with a new one — delete that
+file to accept the new set.
+
+> **Tip:** the per-meter sensors are inherently more robust than the category
+> totals for the Energy Dashboard, which sums multiple sources for you anyway.
+
+
 
 ### How the heating meter is detected
 

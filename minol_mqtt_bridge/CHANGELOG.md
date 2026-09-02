@@ -49,6 +49,19 @@
 - Responses for an unrecognised consumption key are now discarded. The portal
   does not reject an unknown key; it silently returns *every* category at once,
   which would have folded water meters into the heating total.
+- A category total is no longer published when the response is missing a meter
+  that earlier cycles reported. The total is a sum over whatever came back, so
+  one absent meter lowered it, and `total_increasing` reads that as a meter
+  reset and books the rest of the category as fresh consumption. Seen meters are
+  remembered in `minol_known_meters.json` (in `/data` for the add-on); delete it
+  if a meter is genuinely gone. Per-meter sensors were never affected.
+- Months the portal has no reading for yet are published as `null` in
+  `monthly_data` instead of `0`, which claimed the meter consumed nothing in a
+  month that simply has not been read.
+- The total sensors carry `total_period`, `monthly_data_period` and
+  `monthly_data_sum`, so it is clear why the state does not equal the sum of the
+  monthly breakdown beside it (the state covers everything on record, the
+  breakdown only the recent window).
 - A meter row that carries no consumption field is no longer published as `0`.
   It used to be indistinguishable from a meter that genuinely consumed nothing,
   and under `total_increasing` a spurious `0` reads as a meter reset, so the

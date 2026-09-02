@@ -254,6 +254,58 @@ def _category_unit(data, category_key, default_unit, default_device_class):
     return default_unit, default_device_class
 
 
+# Meters seen in previous cycles, so a category total is never published from a
+# partial set. /data is the add-on's persistent volume; alongside the script
+# when running locally.
+KNOWN_METERS_PATH = os.path.join(
+    "/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__)),
+    "minol_known_meters.json",
+)
+
+
+def _meter_ids(cat):
+    """Stable identifiers for the meters a category came back with."""
+    return {
+        str(room.get("internal_key") or room.get("device_number") or room.get("room_name"))
+        for room in (cat.get("by_room") or [])
+    }
+
+
+def load_known_meters():
+    """Read the meters seen in previous cycles, per category."""
+    try:
+        with open(KNOWN_METERS_PATH, "r", encoding="utf-8") as f:
+            return {k: set(v) for k, v in json.load(f).items()}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_known_meters(known):
+    """Persist the meters seen, so a later partial response is recognisable."""
+    if DRY_RUN:
+        return
+    try:
+        with open(KNOWN_METERS_PATH, "w", encoding="utf-8") as f:
+            json.dump({k: sorted(v) for k, v in known.items()}, f, indent=2)
+    except OSError as e:
+        logger.warning(f"Could not persist known meters to {KNOWN_METERS_PATH}: {e}")
+
+
+def _missing_meters(data, category_key, known):
+    """
+    Meters seen before that are absent from this response.
+
+    A category total is the sum over whatever meters came back, so one missing
+    meter silently lowers it. Under state_class total_increasing Home Assistant
+    reads that drop as a meter reset and books the remaining value as fresh
+    consumption, injecting a spike worth the whole rest of the category.
+    """
+    cat = data.get(category_key) or {}
+    if not cat.get("by_room"):
+        return set()
+    return known.get(category_key, set()) - _meter_ids(cat)
+
+
 def _category_has_data(data, category_key):
     """True if the portal returned usable data for this category."""
     cat = data.get(category_key) or {}
@@ -305,6 +357,8 @@ def run_sync():
     for cat in ("heating", "hot_water", "cold_water"):
         if isinstance(data.get(cat), dict) and data[cat].get("error"):
             logger.warning(f"Portal returned no usable '{cat}' data: {data[cat]['error']}")
+
+    known_meters = load_known_meters()
 
     user_info = connector.user_info
     if user_info:
@@ -383,15 +437,26 @@ def run_sync():
         reference_timeline = cat.get("reference_timeline")
         din_comparison = calculate_din_comparison(timeline, reference_timeline)
 
+        monthly = [
+            {
+                "period": entry.get("period"),
+                "value": entry.get("value"),
+                "label": entry.get("label", ""),
+            }
+            for entry in timeline
+        ]
+        # The state covers everything the portal holds, while monthly_data is
+        # only the recent window, so the two deliberately do not add up. Spell
+        # that out rather than leaving it as a discrepancy to puzzle over.
+        monthly_sum = round(sum(e["value"] or 0 for e in monthly), 3)
+
         timeline_attrs = {
-            "monthly_data": [
-                {
-                    "period": entry.get("period"),
-                    "value": entry.get("value", 0),
-                    "label": entry.get("label", ""),
-                }
-                for entry in timeline
-            ],
+            "monthly_data": monthly,
+            "monthly_data_period": (
+                f"{monthly[0]['period']}..{monthly[-1]['period']}" if monthly else None
+            ),
+            "monthly_data_sum": monthly_sum,
+            "total_period": cat.get("total_period"),
             "din_comparison_percent": din_comparison,
             "total_source": cat.get("total_source"),
             "cons_type": cat.get("cons_type"),
@@ -406,7 +471,15 @@ def run_sync():
         )
         publish_attributes(uid, timeline_attrs)
 
-        if _category_has_data(data, category_key):
+        missing = _missing_meters(data, category_key, known_meters)
+        if missing:
+            logger.error(
+                f"'{category_key}' came back without meter(s) {sorted(missing)} that "
+                f"earlier cycles reported - leaving {uid} unchanged rather than "
+                f"publishing a total short by those meters. If a meter really is "
+                f"gone for good, delete {KNOWN_METERS_PATH} to accept the new set."
+            )
+        elif _category_has_data(data, category_key):
             publish_state(uid, cat.get("total_consumption", 0))
         else:
             logger.warning(
@@ -462,7 +535,7 @@ def run_sync():
                 "overall_timeline": [
                     {
                         "period": entry.get("period"),
-                        "value": entry.get("value", 0),
+                        "value": entry.get("value"),
                     }
                     for entry in overall_timeline
                 ],
@@ -527,6 +600,14 @@ def run_sync():
     publish_din_comparison("heating", "Heating")
     publish_din_comparison("hot_water", "Hot Water")
     publish_din_comparison("cold_water", "Cold Water")
+
+    # Union rather than replace: a meter absent from this response must stay
+    # expected, or the very next cycle would accept the short total.
+    for cat in ("heating", "hot_water", "cold_water"):
+        seen = _meter_ids(data.get(cat) or {})
+        if seen:
+            known_meters[cat] = known_meters.get(cat, set()) | seen
+    save_known_meters(known_meters)
 
     if DRY_RUN:
         logger.info(f"Dry run collected {len(_dry_run_messages)} MQTT message(s)")

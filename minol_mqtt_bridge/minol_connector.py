@@ -487,9 +487,19 @@ class MinolConnector:
         comparison is calculated over - both of which are about recent
         behaviour rather than everything on record.
         """
+        full = processed["timeline"]
+        # Remember what the total actually spans before narrowing the chart,
+        # so a reader can see why the state does not equal the sum of the
+        # monthly breakdown published beside it.
+        with_values = [e for e in full if e["value"] is not None]
+        processed["total_period"] = (
+            f"{with_values[0]['period']}..{with_values[-1]['period']}"
+            if with_values else None
+        )
+
         if not history_months or history_months <= 0:
             return
-        processed["timeline"] = processed["timeline"][-history_months:]
+        processed["timeline"] = full[-history_months:]
         processed["reference_timeline"] = processed["reference_timeline"][-history_months:]
 
     @staticmethod
@@ -532,6 +542,7 @@ class MinolConnector:
             "reference_timeline": [],
             "total_consumption": 0.0,
             "total_source": "none",
+            "total_period": None,
             "cons_type": consumption_type,
         }
 
@@ -605,10 +616,15 @@ class MinolConnector:
         for entry in raw_data.get("chart") or []:
             if not isinstance(entry, dict):
                 continue
+            # A month the portal has no reading for yet comes back as null.
+            # Keep it null rather than folding it into 0.0, which would claim
+            # the meter consumed nothing in a month that simply has not been
+            # read - visible as false zeros when charting monthly_data.
+            raw_value = entry.get("value")
             timeline_entry = {
                 "period": entry.get("category"),
                 "period_int": entry.get("categoryInt"),
-                "value": num(entry.get("value", 0)),
+                "value": None if raw_value is None else num(raw_value),
                 "label": entry.get("label"),
                 "num_values": entry.get("anzValues", 0),
             }
@@ -621,7 +637,7 @@ class MinolConnector:
         # Fall back to the monthly chart when the portal gives no per-room table
         # (observed for HEIZUNG with heat cost allocators).
         if not processed["by_room"] and processed["timeline"]:
-            chart_total = sum(e["value"] for e in processed["timeline"])
+            chart_total = sum(e["value"] or 0 for e in processed["timeline"])
             if chart_total:
                 processed["total_consumption"] = chart_total
                 processed["total_source"] = "chart"

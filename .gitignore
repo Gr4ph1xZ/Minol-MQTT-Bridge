@@ -10,3 +10,6 @@ current_page.html
 monitoring_index_page.html
 monitoring_page_response.html
 user_tenants_error_response.html
+
+# Runtime state: which meters have been seen, so a partial response is detectable
+minol_known_meters.json
