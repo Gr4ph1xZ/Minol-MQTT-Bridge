@@ -96,18 +96,24 @@ base_url: "https://webservices.minol.com"
 | `minol_email` | Yes | - | Your Minol portal login email |
 | `minol_password` | Yes | - | Your Minol portal password |
 | `mqtt_host` | Yes | - | MQTT broker hostname (use `core-mosquitto` for built-in broker) |
-| `mqtt_port` | No | 1883 | MQTT broker port |
+| `mqtt_port` | No | 1883 | MQTT broker port (`1883` plain, `8883` TLS) |
 | `mqtt_user` | Yes | - | MQTT username |
 | `mqtt_password` | Yes | - | MQTT password |
+| `mqtt_tls` | No | false | Connect to the broker over TLS (enable for port `8883`) |
+| `mqtt_tls_insecure` | No | false | With `mqtt_tls`, skip certificate/hostname validation |
 | `scan_interval_hours` | No | 12 | How often to fetch new data (in hours) |
 | `base_url` | No | https://webservices.minol.com | Minol portal base URL |
+| `state_class` | No | total_increasing | `state_class` for consumption sensors: `total_increasing`, `total`, `measurement`, `none` |
+| `log_level` | No | INFO | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
+| `dry_run` | No | false | Fetch from the portal but publish nothing; dump what would have been published to JSON and exit |
+| `dry_run_output` | No | `minol_dry_run.json` | Where the dry-run JSON is written |
 
 ## Usage
 
 Once configured and started, the add-on will:
 
 1. Authenticate with the Minol portal using your credentials
-2. Fetch consumption data for the past 12 months
+2. Fetch consumption since the earliest reading the portal holds (the monthly breakdown covers the last 12 months)
 3. Create Home Assistant sensors automatically via MQTT discovery
 4. Update sensors according to the configured interval
 
@@ -116,12 +122,12 @@ Once configured and started, the add-on will:
 The add-on creates the following sensors in Home Assistant:
 
 #### Total Consumption Sensors
-- `sensor.minol_heating_total` - Total heating consumption (kWh)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp
-- `sensor.minol_hot_water_total` - Total hot water consumption (m³)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp
-- `sensor.minol_cold_water_total` - Total cold water consumption (m³)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp
+- `sensor.minol_heating_total` - Heating consumption since the first reading on record (kWh)
+  - **Attributes**: `monthly_data` (last 12 months), `monthly_data_period`, `monthly_data_sum`, `total_period` (what the state covers), DIN comparison %, `cons_type` (the portal key used), `total_source` (`table` or `chart`), last update timestamp
+- `sensor.minol_hot_water_total` - Hot water consumption since the first reading on record (m³)
+  - **Attributes**: `monthly_data` (last 12 months), `monthly_data_period`, `monthly_data_sum`, `total_period` (what the state covers), DIN comparison %, `cons_type` (the portal key used), `total_source` (`table` or `chart`), last update timestamp
+- `sensor.minol_cold_water_total` - Cold water consumption since the first reading on record (m³)
+  - **Attributes**: `monthly_data` (last 12 months), `monthly_data_period`, `monthly_data_sum`, `total_period` (what the state covers), DIN comparison %, `cons_type` (the portal key used), `total_source` (`table` or `chart`), last update timestamp
 
 #### Per-Device/Room Sensors
 - `sensor.minol_<room>_<type>_<device_id>` - One sensor per device
@@ -198,6 +204,20 @@ mosquitto_sub -h localhost -u mqtt_user -P mqtt_password -t "homeassistant/senso
 - Verify your email and password are correct
 - Try logging in manually at https://webservices.minol.com to ensure your account works
 - Check the logs for more detailed error messages
+
+### Heating Sensor Is Missing or Empty
+
+**Problem**: Water sensors are populated but `sensor.minol_heating_total` is not
+
+**Solutions**:
+- The portal keys heating by metering technology — `HEIZUNG` for heat cost
+  allocators, `HZKWH` for kWh heat meters — and only one of them holds data.
+  The add-on tries both automatically; check the `cons_type` attribute on the
+  total sensor to see which one was used.
+- If the log says `heating: consType=… accepted but carries no values` for
+  every key, the portal genuinely has no heating data for your account in the
+  requested period. Confirm on the portal's own eMonitoring page.
+- Run with `log_level: DEBUG` to see the full API response bodies.
 
 ### No Sensors Appearing in Home Assistant
 

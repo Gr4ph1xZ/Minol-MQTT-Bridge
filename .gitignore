@@ -1,0 +1,15 @@
+.venv
+__pycache__/
+
+# Dry-run dumps - contain real meter readings
+minol_dry_run.json
+*.dry_run.json
+
+# Debug dumps written by the connector at log_level DEBUG
+current_page.html
+monitoring_index_page.html
+monitoring_page_response.html
+user_tenants_error_response.html
+
+# Runtime state: which meters have been seen, so a partial response is detectable
+minol_known_meters.json

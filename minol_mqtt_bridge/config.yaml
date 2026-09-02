@@ -1,6 +1,6 @@
 name: "Minol MQTT Bridge"
 description: "Fetches Minol consumption data via Playwright and sends it to MQTT."
-version: "1.0.1"
+version: "1.2.0"
 slug: "minol_mqtt"
 init: false
 arch:
@@ -16,9 +16,14 @@ options:
   mqtt_port: 1883
   mqtt_user: "mqtt_user"
   mqtt_password: "mqtt_password"
+  mqtt_tls: false
+  mqtt_tls_insecure: false
   scan_interval_hours: 12
   base_url: "https://webservices.minol.com"
+  state_class: "total_increasing"
   log_level: "INFO"
+  dry_run: false
+  dry_run_output: ""
 schema:
   minol_email: str
   minol_password: str
@@ -26,6 +31,11 @@ schema:
   mqtt_port: int
   mqtt_user: str
   mqtt_password: str
+  mqtt_tls: bool
+  mqtt_tls_insecure: bool
   scan_interval_hours: int
   base_url: str
+  state_class: list(total|total_increasing|measurement|none)
   log_level: list(DEBUG|INFO|WARNING|ERROR|CRITICAL)
+  dry_run: bool?
+  dry_run_output: str?

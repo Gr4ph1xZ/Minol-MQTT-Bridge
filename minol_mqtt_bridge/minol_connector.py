@@ -23,8 +23,64 @@ DEFAULT_HEADERS = {
 }
 
 
+def _dump_debug(filename, text, force=False):
+    """
+    Write a page/response body next to the add-on for troubleshooting.
+
+    Only at DEBUG unless `force` (an actual failure worth keeping evidence of),
+    so a normal run does not leave megabytes of HTML in the container, and
+    never fatal - a read-only working directory must not take the sync down.
+    """
+    if not force and not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.debug(f"Wrote {filename} for troubleshooting")
+    except OSError as e:
+        logger.debug(f"Could not write {filename}: {e}")
+
+
 class MinolConnector:
     """Minol customer portal API client with Playwright-based authentication."""
+
+    # consType values the portal accepts, per category, in the order they are
+    # tried. Heating is keyed by the metering technology actually installed:
+    # "HEIZUNG" for heat cost allocators reporting in allocator units, "HZKWH"
+    # for heat meters reporting kWh (dlg "100KWH"). An account only ever has
+    # one of them - the portal accepts the other but answers with an empty
+    # table and a chart holding nothing but the DIN reference curve.
+    #
+    # "HEIZUNG" is tried first because it is what the portal's own UI5 app
+    # (monitoring/Component.js) seeds its filter model with; that app then
+    # replaces it with whatever the account actually has. Probing is the only
+    # way to learn that from outside - no endpoint reports it.
+    CONS_TYPES = {
+        "heating": ("HEIZUNG", "HZKWH"),
+        "hot_water": ("WARMWASSER",),
+        "cold_water": ("KALTWASSER",),
+    }
+
+    # valuesInKWH to request per category. Water is asked for in its native m³:
+    # with valuesInKWH=True the portal labels the warm water row "KWH" but
+    # leaves 'consumption' in m³ (only 'consumptionBew' and the chart are
+    # converted), so the row would be published as a volume wearing an energy
+    # unit. Heating asks for kWh, which is what a heat meter reports anyway.
+    VALUES_IN_KWH = {
+        "heating": True,
+        "hot_water": False,
+        "cold_water": False,
+    }
+
+    # timelineStart for the consumption request. The portal has no notion of a
+    # billing period here: it reports 'anfangsstand' as the meter reading at the
+    # window start and 'consumption' as the difference to the window end, for
+    # exactly the window asked for. A window that slides with the clock would
+    # therefore yield a rolling sum that falls whenever a heavy month drops out
+    # of it, and Home Assistant reads such a fall as a meter reset. Anchoring
+    # the start far in the past makes the portal clamp to the earliest reading
+    # it holds, so consumption is measured from a fixed point and only grows.
+    TIMELINE_ANCHOR = "200001"
 
     def __init__(self, email: str, password: str, base_url: str = "https://webservices.minol.com"):
         """Initialize the connector with user credentials."""
@@ -72,9 +128,7 @@ class MinolConnector:
                     logger.info("On Azure B2C login page")
                 else:
                     logger.info("Checking for login redirect...")
-                    page_content = page.content()
-                    with open("current_page.html", "w", encoding="utf-8") as f:
-                        f.write(page_content)
+                    _dump_debug("current_page.html", page.content())
 
                     try:
                         page.wait_for_url("**/minolauth.b2clogin.com/**", timeout=5000)
@@ -215,25 +269,36 @@ class MinolConnector:
             raise
         except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Error processing user tenants response: {e}")
-            with open("user_tenants_error_response.html", "w", encoding="utf-8") as f:
-                f.write(response.text)
+            _dump_debug("user_tenants_error_response.html", response.text, force=True)
             logger.error("Response content saved to user_tenants_error_response.html")
             raise
 
-    def fetch_em_data(self, timeline_start, timeline_end, cons_type="HEIZUNG", dlg_key="100EH"):
+    def fetch_em_data(self, timeline_start, timeline_end, cons_type="HEIZUNG",
+                      dlg_key="100EH", values_in_kwh=True, max_retries=3):
         """
         Fetch eMonitoring data for a specific consumption type.
 
         Args:
             timeline_start (str): Start period in format YYYYMM (e.g., "202411")
             timeline_end (str): End period in format YYYYMM (e.g., "202510")
-            cons_type (str): Type of consumption - "HEIZUNG", "WARMWASSER", or "KALTWASSER"
-            dlg_key (str): Dialog key, default "100EH" for heating
+            cons_type (str): Consumption key the portal understands - "HEIZUNG",
+                "HZKWH", "WARMWASSER", "KALTWASSER", "STROM" or "GAS". An
+                unknown key is not rejected; the portal answers with every
+                category at once. See MinolConnector.CONS_TYPES.
+            dlg_key (str): Dialog key, default "100EH" for heating. The portal
+                appears to ignore it - the response is selected by cons_type.
+            values_in_kwh (bool): Ask the portal to convert values to kWh. It
+                converts the chart and the row's consumptionBew, but leaves the
+                row's 'consumption' in the meter's own unit while relabelling
+                'unit' as KWH - so water must be requested with False to stay
+                in m³. See MinolConnector.VALUES_IN_KWH.
+            max_retries (int): Attempts for transient network/5xx/JSON errors.
 
         Returns:
             dict: JSON response containing table (per room) and chart (timeline) data
         """
-        logger.info(f"Fetching eMonitoring data for {cons_type} from {timeline_start} to {timeline_end}")
+        logger.info(f"Fetching eMonitoring data for {cons_type} from {timeline_start} "
+                    f"to {timeline_end} (valuesInKWH={values_in_kwh})")
         url = f"{self.base_url}/minol.com~kundenportal~em~web/rest/EMData/readData"
         payload = {
             "userNum": self.user_num,
@@ -247,7 +312,7 @@ class MinolConnector:
             "timelineStartTxt": f"{timeline_start[4:]}.{timeline_start[:4]}",
             "timelineEnd": timeline_end,
             "timelineEndTxt": f"{timeline_end[4:]}.{timeline_end[:4]}",
-            "valuesInKWH": True,
+            "valuesInKWH": values_in_kwh,
             "dlgKey": dlg_key,
         }
         headers = {
@@ -261,23 +326,42 @@ class MinolConnector:
         logger.debug(f"Request Payload: {json.dumps(payload, indent=2)}")
         logger.debug(f"Request Headers: {json.dumps(headers, indent=2)}")
 
-        try:
-            response = self.session.post(url, headers=headers, data=json.dumps(payload))
-            response.raise_for_status()
-            logger.debug(f"EM data response status: {response.status_code}")
-            logger.debug(f"EM data response content: {response.text[:200]}...")
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error fetching EM data: {e}")
-            raise
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding EM data response: {e}")
-            with open("em_data_error_response.html", "w", encoding="utf-8") as f:
-                f.write(response.text)
-            logger.error("Response content saved to em_data_error_response.html")
-            raise
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.session.post(url, headers=headers, data=json.dumps(payload))
+                response.raise_for_status()
+                logger.debug(f"EM data response status: {response.status_code}")
+                # Full body at DEBUG - the per-room 'table' can be far past the
+                # first few hundred characters, and an empty table for HEIZUNG is
+                # only diagnosable with the whole payload.
+                logger.debug(f"EM data response content ({cons_type}): {response.text}")
+                return response.json()
+            except requests.exceptions.HTTPError as e:
+                last_error = e
+                status = getattr(e.response, "status_code", None)
+                if status is not None and status < 500:
+                    logger.error(f"HTTP {status} fetching EM data for {cons_type}: {e}")
+                    raise
+                logger.warning(f"HTTP {status} fetching EM data for {cons_type} "
+                               f"(attempt {attempt}/{max_retries}): {e}")
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                logger.warning(f"Network error fetching EM data for {cons_type} "
+                               f"(attempt {attempt}/{max_retries}): {e}")
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(f"Non-JSON EM data response for {cons_type} "
+                               f"(attempt {attempt}/{max_retries}): {e}")
+                logger.debug(f"Offending response body: {response.text[:2000]}")
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
 
-    def get_all_consumption_data(self, timeline_start, timeline_end):
+        logger.error(f"Giving up fetching EM data for {cons_type} after "
+                     f"{max_retries} attempts: {last_error}")
+        raise last_error or RuntimeError(f"EM data fetch failed for {cons_type}")
+
+    def get_all_consumption_data(self, timeline_start, timeline_end, history_months=None):
         """
         Fetch all consumption data types (heating, hot water, cold water) organized by room.
 
@@ -319,34 +403,122 @@ class MinolConnector:
             }
         }
 
-        try:
-            heating_raw = self.fetch_em_data(timeline_start, timeline_end, cons_type="HEIZUNG", dlg_key="100EH")
-            consumption_data["heating"] = self._process_consumption_data(
-                heating_raw, "HEIZUNG", timeline_start, timeline_end
-            )
-        except Exception as e:
-            logger.error(f"Error fetching heating data: {e}")
-            consumption_data["heating"] = {"error": str(e)}
+        for key, dlg_key in (
+            ("heating", "100EH"),
+            ("hot_water", "100WW"),
+            ("cold_water", "100KW"),
+        ):
+            try:
+                processed = self._fetch_category(
+                    key, dlg_key, timeline_start, timeline_end
+                )
+                # After the total is settled, so trimming only affects the
+                # monthly breakdown and the DIN comparison.
+                self._trim_timeline(processed, history_months)
 
-        try:
-            hot_water_raw = self.fetch_em_data(timeline_start, timeline_end, cons_type="WARMWASSER", dlg_key="100WW")
-            consumption_data["hot_water"] = self._process_consumption_data(
-                hot_water_raw, "WARMWASSER", timeline_start, timeline_end
-            )
-        except Exception as e:
-            logger.error(f"Error fetching hot water data: {e}")
-            consumption_data["hot_water"] = {"error": str(e)}
+                if not processed["by_room"] and processed.get("total_source") != "chart":
+                    logger.warning(
+                        f"{key}: portal returned no per-room table and no usable "
+                        f"chart values for {timeline_start}-{timeline_end} "
+                        f"(tried consType {', '.join(self.CONS_TYPES[key])})"
+                    )
 
-        try:
-            cold_water_raw = self.fetch_em_data(timeline_start, timeline_end, cons_type="KALTWASSER", dlg_key="100KW")
-            consumption_data["cold_water"] = self._process_consumption_data(
-                cold_water_raw, "KALTWASSER", timeline_start, timeline_end
-            )
-        except Exception as e:
-            logger.error(f"Error fetching cold water data: {e}")
-            consumption_data["cold_water"] = {"error": str(e)}
+                consumption_data[key] = processed
+            except Exception as e:
+                logger.error(f"Error fetching {key} data: {e}")
+                consumption_data[key] = {"error": str(e)}
 
         return consumption_data
+
+    def _fetch_category(self, key, dlg_key, timeline_start, timeline_end):
+        """
+        Fetch one consumption category, trying each consType the portal may use.
+
+        Returns the first candidate that actually carries values; if none do,
+        the first well-formed (but empty) result is returned so that callers
+        still see the DIN reference curve and can report the gap.
+        """
+        empty = None
+        values_in_kwh = self.VALUES_IN_KWH[key]
+
+        for cons_type in self.CONS_TYPES[key]:
+            raw = self.fetch_em_data(
+                timeline_start, timeline_end, cons_type=cons_type, dlg_key=dlg_key,
+                values_in_kwh=values_in_kwh
+            )
+
+            if not self._cons_type_understood(raw, cons_type):
+                logger.warning(
+                    f"{key}: portal did not recognise consType={cons_type} and "
+                    f"answered with every category at once; ignoring that response"
+                )
+                continue
+
+            processed = self._process_consumption_data(
+                raw, cons_type, timeline_start, timeline_end
+            )
+
+            if processed["by_room"] or any(e["value"] for e in processed["timeline"]):
+                logger.info(f"{key}: using consType={cons_type} "
+                            f"({len(processed['by_room'])} meter(s), "
+                            f"total {processed['total_consumption']})")
+                return processed
+
+            # Expected: an account has meters under exactly one of the keys, so
+            # the others are silently skipped. If none match, the caller logs a
+            # warning naming every key that was tried.
+            logger.debug(f"{key}: consType={cons_type} accepted but carries no values")
+            if empty is None:
+                empty = processed
+
+        return empty if empty is not None else self._process_consumption_data(
+            {}, self.CONS_TYPES[key][0], timeline_start, timeline_end
+        )
+
+    @staticmethod
+    def _trim_timeline(processed, history_months):
+        """
+        Keep only the most recent `history_months` entries of the monthly chart.
+
+        The request is anchored far in the past so that the total is measured
+        from a fixed point, which makes the chart span the whole tenancy. The
+        total has already been derived by the time this runs, so trimming only
+        narrows what is published as the monthly breakdown and what the DIN
+        comparison is calculated over - both of which are about recent
+        behaviour rather than everything on record.
+        """
+        full = processed["timeline"]
+        # Remember what the total actually spans before narrowing the chart,
+        # so a reader can see why the state does not equal the sum of the
+        # monthly breakdown published beside it.
+        with_values = [e for e in full if e["value"] is not None]
+        processed["total_period"] = (
+            f"{with_values[0]['period']}..{with_values[-1]['period']}"
+            if with_values else None
+        )
+
+        if not history_months or history_months <= 0:
+            return
+        processed["timeline"] = full[-history_months:]
+        processed["reference_timeline"] = processed["reference_timeline"][-history_months:]
+
+    @staticmethod
+    def _cons_type_understood(raw_data, cons_type):
+        """
+        True if the portal actually understood `cons_type`.
+
+        An unknown consType is not rejected - the portal silently answers with
+        every consumption type at once, which would fold other categories'
+        meters into this one's per-room table and total.
+        """
+        if not isinstance(raw_data, dict):
+            return False
+        key_figures = {
+            entry.get("keyFigure")
+            for entry in (raw_data.get("chart") or [])
+            if isinstance(entry, dict) and entry.get("keyFigure") not in (None, "REF")
+        }
+        return key_figures <= {cons_type}
 
     def _process_consumption_data(self, raw_data, consumption_type, timeline_start, timeline_end):
         """
@@ -367,37 +539,108 @@ class MinolConnector:
         processed = {
             "by_room": [],
             "timeline": [],
-            "total_consumption": 0.0
+            "reference_timeline": [],
+            "total_consumption": 0.0,
+            "total_source": "none",
+            "total_period": None,
+            "cons_type": consumption_type,
         }
 
-        if "table" in raw_data and raw_data["table"]:
-            for room_data in raw_data["table"]:
-                room_info = {
-                    "room_name": room_data.get("raum", "Unknown"),
-                    "room_key": room_data.get("raumKey"),
-                    "device_number": room_data.get("gerNr"),
-                    "consumption": room_data.get("consumption", 0),
-                    "unit": room_data.get("unit", "KWH"),
-                    "consumption_evaluated": room_data.get("consumptionBew", 0),
-                    "evaluation_score": room_data.get("bewertung"),
-                    "reading": room_data.get("ablesung", 0),
-                    "initial_reading": room_data.get("anfangsstand", 0),
-                    # Note: Per-room timeline not available from API
-                }
-                processed["by_room"].append(room_info)
-                processed["total_consumption"] += room_data.get("consumption", 0)
+        if not isinstance(raw_data, dict):
+            logger.warning(f"{consumption_type}: unexpected response type "
+                           f"{type(raw_data).__name__}")
+            return processed
 
-        if "chart" in raw_data and raw_data["chart"]:
-            for entry in raw_data["chart"]:
-                if entry.get("keyFigure") != "REF":
-                    timeline_entry = {
-                        "period": entry.get("category"),
-                        "period_int": entry.get("categoryInt"),
-                        "value": entry.get("value", 0),
-                        "label": entry.get("label"),
-                        "num_values": entry.get("anzValues", 0)
-                    }
-                    processed["timeline"].append(timeline_entry)
+        def num(value, default=0.0):
+            try:
+                if value in (None, ""):
+                    return default
+                return float(str(value).replace(",", "."))
+            except (TypeError, ValueError):
+                return default
+
+        def first(mapping, *keys, default=None):
+            for k in keys:
+                v = mapping.get(k)
+                if v not in (None, ""):
+                    return v
+            return default
+
+        table = raw_data.get("table") or []
+        for room_data in table:
+            if not isinstance(room_data, dict):
+                continue
+
+            internal_key = room_data.get("internalKey")
+            device_number = first(
+                room_data, "gerNr", "geraeteNr", "geraetenummer", "zaehlerNr", "zaehlernummer"
+            )
+            if device_number is None and internal_key and ";" in str(internal_key):
+                device_number = str(internal_key).split(";")[-1].strip()
+
+            room_name = first(
+                room_data, "raum", "raumBez", "raumText", "bezeichnung",
+                "beschreibung", "description",
+            )
+            if room_name is None or str(room_name).strip() == str(device_number or "").strip():
+                room_name = first(room_data, "raum", "raumBez", "bezeichnung", default="Unknown")
+
+            # Distinguish "the meter consumed 0" from "the row carried no
+            # consumption field at all". Both used to read as 0.0, and a
+            # spurious 0 looks like a meter reset to Home Assistant's
+            # total_increasing handling, which then books the recovery as fresh
+            # consumption and permanently double-counts the billing period.
+            reported = first(room_data, "consumption", "verbrauch")
+            consumption = num(reported, 0.0)
+
+            room_info = {
+                "room_name": str(room_name),
+                "room_key": first(room_data, "raumKey", "raumId"),
+                "device_number": device_number,
+                "internal_key": internal_key,
+                "consumption": consumption,
+                "consumption_reported": reported is not None,
+                "unit": first(room_data, "unit", "einheit", "einheitText", default="KWH"),
+                "consumption_evaluated": num(first(room_data, "consumptionBew", "verbrauchBew", default=0)),
+                "evaluation_score": first(room_data, "bewertung", "bewertungsfaktor"),
+                "reading": num(first(room_data, "ablesung", "ablesungMax", "zaehlerstand", default=0)),
+                "initial_reading": num(first(room_data, "anfangsstand", "ablesungMin", default=0)),
+                # Note: Per-room timeline not available from API
+            }
+            processed["by_room"].append(room_info)
+            processed["total_consumption"] += consumption
+
+        if processed["by_room"]:
+            processed["total_source"] = "table"
+
+        for entry in raw_data.get("chart") or []:
+            if not isinstance(entry, dict):
+                continue
+            # A month the portal has no reading for yet comes back as null.
+            # Keep it null rather than folding it into 0.0, which would claim
+            # the meter consumed nothing in a month that simply has not been
+            # read - visible as false zeros when charting monthly_data.
+            raw_value = entry.get("value")
+            timeline_entry = {
+                "period": entry.get("category"),
+                "period_int": entry.get("categoryInt"),
+                "value": None if raw_value is None else num(raw_value),
+                "label": entry.get("label"),
+                "num_values": entry.get("anzValues", 0),
+            }
+            is_ref = entry.get("keyFigure") == "REF" or entry.get("label") == "REF"
+            if is_ref:
+                processed["reference_timeline"].append(timeline_entry)
+            else:
+                processed["timeline"].append(timeline_entry)
+
+        # Fall back to the monthly chart when the portal gives no per-room table
+        # (observed for HEIZUNG with heat cost allocators).
+        if not processed["by_room"] and processed["timeline"]:
+            chart_total = sum(e["value"] or 0 for e in processed["timeline"])
+            if chart_total:
+                processed["total_consumption"] = chart_total
+                processed["total_source"] = "chart"
 
         return processed
 
@@ -429,8 +672,12 @@ class MinolConnector:
         """
         Fetch all consumption data (heating, hot water, cold water) with caching.
 
+        The totals always cover everything the portal holds, measured from a
+        fixed anchor so they only ever grow; `months_back` narrows the monthly
+        breakdown that goes out as sensor attributes, not the totals.
+
         Args:
-            months_back: Number of months of historical data to fetch (default: 12)
+            months_back: Months of monthly history to keep (default: 12)
             force_update: Force data refresh even if cached data exists
 
         Returns:
@@ -447,15 +694,16 @@ class MinolConnector:
                 return None
 
         try:
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=30 * months_back)
+            timeline_start = self.TIMELINE_ANCHOR
+            timeline_end = datetime.now().strftime("%Y%m")
 
-            timeline_start = start_date.strftime("%Y%m")
-            timeline_end = end_date.strftime("%Y%m")
+            logger.info(f"Fetching consumption data from {timeline_start} to "
+                        f"{timeline_end} (portal clamps to the earliest reading "
+                        f"it holds), keeping {months_back} months of history")
 
-            logger.info(f"Fetching consumption data from {timeline_start} to {timeline_end}")
-
-            data = self.get_all_consumption_data(timeline_start, timeline_end)
+            data = self.get_all_consumption_data(
+                timeline_start, timeline_end, history_months=months_back
+            )
             self._last_data = data
             self._last_update = datetime.now()
 

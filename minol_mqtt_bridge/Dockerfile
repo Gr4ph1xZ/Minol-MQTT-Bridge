@@ -7,7 +7,7 @@ WORKDIR /app
 # Install python dependencies
 # paho-mqtt for MQTT communication
 # requests and beautifulsoup4 are needed by your connector
-RUN pip install paho-mqtt requests beautifulsoup4 playwright==1.56.0
+RUN pip install "paho-mqtt>=2.1,<3" requests beautifulsoup4 playwright==1.56.0
 
 # Copy necessary files
 COPY run.sh /app/
