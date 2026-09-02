@@ -48,15 +48,38 @@ mqtt_tls_insecure: true   # only if the broker cert is issued for a different ho
 With plain `mqtt_tls: true` the broker certificate is validated against `mqtt_host`;
 use `mqtt_tls_insecure: true` if that name is not on the certificate.
 
-### Units and heating data
+### Units
 
-* Each meter is published with the unit the Minol portal reports for it. Warm-water
-  meters that are billed in kWh now appear as `kWh` / `energy` instead of `m³`.
-* Some heating installations (heat cost allocators) do not expose a per-room table
-  in kWh. The add-on retries in the meter's native units and, if that still returns
-  nothing, falls back to the monthly chart for the heating total. If the heating
-  sensor stays empty, run once with `log_level: DEBUG` and check the logged
-  `EM data response content (HEIZUNG)` line.
+* Heating is published in `kWh` (`device_class: energy`).
+* Hot and cold water are published in `m³` (`device_class: water`).
+
+> **Note for users upgrading from 1.1.0 or earlier:** hot water used to be
+> published as `kWh`. That was wrong — the value was the meter's m³ reading
+> carrying an energy unit, because the portal relabels the unit when asked to
+> convert to kWh but does not convert that particular field. Hot water is now
+> requested in its native m³ and the numbers are unchanged, only correctly
+> labelled. Home Assistant will refuse the new unit for the existing
+> statistics, so delete the old ones once: **Developer Tools → Statistics**,
+> find `sensor.minol_hot_water_*`, and use *Fix issue* / delete.
+
+### How the heating meter is detected
+
+The Minol portal keys heating by the metering technology installed in your flat,
+and only one of the two ever holds data:
+
+| Portal key | Metering technology |
+| :--- | :--- |
+| `HEIZUNG` | Heat cost allocators (Heizkostenverteiler), allocator units |
+| `HZKWH` | Heat meters (Wärmezähler) reporting kWh |
+
+The add-on tries both and uses whichever actually returns meters, so no
+configuration is needed. The key that was used is published on the total
+sensor as the `cons_type` attribute — useful when opening an issue.
+
+If a consumption sensor stays empty, run once with `log_level: DEBUG` and look
+for the line `<category>: consType=<key> accepted but carries no values`. That
+means the portal has no data for your account in the requested period rather
+than the add-on asking the wrong question.
 
 ## Sensors
 

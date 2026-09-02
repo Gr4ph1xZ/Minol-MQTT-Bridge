@@ -120,11 +120,11 @@ The add-on creates the following sensors in Home Assistant:
 
 #### Total Consumption Sensors
 - `sensor.minol_heating_total` - Total heating consumption (kWh)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp
+  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp, `cons_type` (the portal key the data came from), `total_source` (`table` or `chart`)
 - `sensor.minol_hot_water_total` - Total hot water consumption (m³)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp
+  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp, `cons_type` (the portal key the data came from), `total_source` (`table` or `chart`)
 - `sensor.minol_cold_water_total` - Total cold water consumption (m³)
-  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp
+  - **Attributes**: 12-month timeline, DIN comparison %, last update timestamp, `cons_type` (the portal key the data came from), `total_source` (`table` or `chart`)
 
 #### Per-Device/Room Sensors
 - `sensor.minol_<room>_<type>_<device_id>` - One sensor per device
@@ -201,6 +201,20 @@ mosquitto_sub -h localhost -u mqtt_user -P mqtt_password -t "homeassistant/senso
 - Verify your email and password are correct
 - Try logging in manually at https://webservices.minol.com to ensure your account works
 - Check the logs for more detailed error messages
+
+### Heating Sensor Is Missing or Empty
+
+**Problem**: Water sensors are populated but `sensor.minol_heating_total` is not
+
+**Solutions**:
+- The portal keys heating by metering technology — `HEIZUNG` for heat cost
+  allocators, `HZKWH` for kWh heat meters — and only one of them holds data.
+  The add-on tries both automatically; check the `cons_type` attribute on the
+  total sensor to see which one was used.
+- If the log says `heating: consType=… accepted but carries no values` for
+  every key, the portal genuinely has no heating data for your account in the
+  requested period. Confirm on the portal's own eMonitoring page.
+- Run with `log_level: DEBUG` to see the full API response bodies.
 
 ### No Sensors Appearing in Home Assistant
 

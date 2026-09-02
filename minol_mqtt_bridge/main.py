@@ -345,6 +345,7 @@ def run_sync():
             ],
             "din_comparison_percent": din_comparison,
             "total_source": cat.get("total_source"),
+            "cons_type": cat.get("cons_type"),
             "last_update": data.get("timestamp", ""),
         }
         if cat.get("error"):

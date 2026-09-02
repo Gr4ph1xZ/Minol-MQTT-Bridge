@@ -23,8 +23,49 @@ DEFAULT_HEADERS = {
 }
 
 
+def _dump_debug(filename, text, force=False):
+    """
+    Write a page/response body next to the add-on for troubleshooting.
+
+    Only at DEBUG unless `force` (an actual failure worth keeping evidence of),
+    so a normal run does not leave megabytes of HTML in the container, and
+    never fatal - a read-only working directory must not take the sync down.
+    """
+    if not force and not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.debug(f"Wrote {filename} for troubleshooting")
+    except OSError as e:
+        logger.debug(f"Could not write {filename}: {e}")
+
+
 class MinolConnector:
     """Minol customer portal API client with Playwright-based authentication."""
+
+    # consType values the portal accepts, per category, in the order they are
+    # tried. Heating is keyed by the metering technology actually installed:
+    # "HEIZUNG" for heat cost allocators reporting in allocator units, "HZKWH"
+    # for heat meters reporting kWh (dlg "100KWH"). An account only ever has
+    # one of them - the portal accepts the other but answers with an empty
+    # table and a chart holding nothing but the DIN reference curve.
+    CONS_TYPES = {
+        "heating": ("HEIZUNG", "HZKWH"),
+        "hot_water": ("WARMWASSER",),
+        "cold_water": ("KALTWASSER",),
+    }
+
+    # valuesInKWH to request per category. Water is asked for in its native m³:
+    # with valuesInKWH=True the portal labels the warm water row "KWH" but
+    # leaves 'consumption' in m³ (only 'consumptionBew' and the chart are
+    # converted), so the row would be published as a volume wearing an energy
+    # unit. Heating asks for kWh, which is what a heat meter reports anyway.
+    VALUES_IN_KWH = {
+        "heating": True,
+        "hot_water": False,
+        "cold_water": False,
+    }
 
     def __init__(self, email: str, password: str, base_url: str = "https://webservices.minol.com"):
         """Initialize the connector with user credentials."""
@@ -72,9 +113,7 @@ class MinolConnector:
                     logger.info("On Azure B2C login page")
                 else:
                     logger.info("Checking for login redirect...")
-                    page_content = page.content()
-                    with open("current_page.html", "w", encoding="utf-8") as f:
-                        f.write(page_content)
+                    _dump_debug("current_page.html", page.content())
 
                     try:
                         page.wait_for_url("**/minolauth.b2clogin.com/**", timeout=5000)
@@ -215,8 +254,7 @@ class MinolConnector:
             raise
         except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Error processing user tenants response: {e}")
-            with open("user_tenants_error_response.html", "w", encoding="utf-8") as f:
-                f.write(response.text)
+            _dump_debug("user_tenants_error_response.html", response.text, force=True)
             logger.error("Response content saved to user_tenants_error_response.html")
             raise
 
@@ -228,11 +266,17 @@ class MinolConnector:
         Args:
             timeline_start (str): Start period in format YYYYMM (e.g., "202411")
             timeline_end (str): End period in format YYYYMM (e.g., "202510")
-            cons_type (str): Type of consumption - "HEIZUNG", "WARMWASSER", or "KALTWASSER"
-            dlg_key (str): Dialog key, default "100EH" for heating
-            values_in_kwh (bool): Request values converted to kWh. Some heating
-                installations (heat cost allocators) only return a per-room table
-                when this is False.
+            cons_type (str): Consumption key the portal understands - "HEIZUNG",
+                "HZKWH", "WARMWASSER", "KALTWASSER", "STROM" or "GAS". An
+                unknown key is not rejected; the portal answers with every
+                category at once. See MinolConnector.CONS_TYPES.
+            dlg_key (str): Dialog key, default "100EH" for heating. The portal
+                appears to ignore it - the response is selected by cons_type.
+            values_in_kwh (bool): Ask the portal to convert values to kWh. It
+                converts the chart and the row's consumptionBew, but leaves the
+                row's 'consumption' in the meter's own unit while relabelling
+                'unit' as KWH - so water must be requested with False to stay
+                in m³. See MinolConnector.VALUES_IN_KWH.
             max_retries (int): Attempts for transient network/5xx/JSON errors.
 
         Returns:
@@ -344,46 +388,21 @@ class MinolConnector:
             }
         }
 
-        for key, cons_type, dlg_key in (
-            ("heating", "HEIZUNG", "100EH"),
-            ("hot_water", "WARMWASSER", "100WW"),
-            ("cold_water", "KALTWASSER", "100KW"),
+        for key, dlg_key in (
+            ("heating", "100EH"),
+            ("hot_water", "100WW"),
+            ("cold_water", "100KW"),
         ):
             try:
-                raw = self.fetch_em_data(
-                    timeline_start, timeline_end, cons_type=cons_type, dlg_key=dlg_key
+                processed = self._fetch_category(
+                    key, dlg_key, timeline_start, timeline_end
                 )
-                processed = self._process_consumption_data(
-                    raw, cons_type, timeline_start, timeline_end
-                )
-
-                # If no per-room table came back, retry once without the kWh
-                # conversion. Heat cost allocators frequently only expose the
-                # room table in their native units.
-                if not processed["by_room"]:
-                    logger.warning(
-                        f"{cons_type}: empty per-room table with valuesInKWH=True; "
-                        f"retrying with valuesInKWH=False"
-                    )
-                    try:
-                        raw_native = self.fetch_em_data(
-                            timeline_start, timeline_end, cons_type=cons_type,
-                            dlg_key=dlg_key, values_in_kwh=False
-                        )
-                        processed_native = self._process_consumption_data(
-                            raw_native, cons_type, timeline_start, timeline_end
-                        )
-                        if processed_native["by_room"] or (
-                            not processed["timeline"] and processed_native["timeline"]
-                        ):
-                            processed = processed_native
-                    except Exception as e:
-                        logger.warning(f"{cons_type}: valuesInKWH=False retry failed: {e}")
 
                 if not processed["by_room"] and processed.get("total_source") != "chart":
                     logger.warning(
-                        f"{cons_type}: portal returned no per-room table and no "
-                        f"usable chart values for {timeline_start}-{timeline_end}"
+                        f"{key}: portal returned no per-room table and no usable "
+                        f"chart values for {timeline_start}-{timeline_end} "
+                        f"(tried consType {', '.join(self.CONS_TYPES[key])})"
                     )
 
                 consumption_data[key] = processed
@@ -392,6 +411,66 @@ class MinolConnector:
                 consumption_data[key] = {"error": str(e)}
 
         return consumption_data
+
+    def _fetch_category(self, key, dlg_key, timeline_start, timeline_end):
+        """
+        Fetch one consumption category, trying each consType the portal may use.
+
+        Returns the first candidate that actually carries values; if none do,
+        the first well-formed (but empty) result is returned so that callers
+        still see the DIN reference curve and can report the gap.
+        """
+        empty = None
+        values_in_kwh = self.VALUES_IN_KWH[key]
+
+        for cons_type in self.CONS_TYPES[key]:
+            raw = self.fetch_em_data(
+                timeline_start, timeline_end, cons_type=cons_type, dlg_key=dlg_key,
+                values_in_kwh=values_in_kwh
+            )
+
+            if not self._cons_type_understood(raw, cons_type):
+                logger.warning(
+                    f"{key}: portal did not recognise consType={cons_type} and "
+                    f"answered with every category at once; ignoring that response"
+                )
+                continue
+
+            processed = self._process_consumption_data(
+                raw, cons_type, timeline_start, timeline_end
+            )
+
+            if processed["by_room"] or any(e["value"] for e in processed["timeline"]):
+                logger.info(f"{key}: using consType={cons_type} "
+                            f"({len(processed['by_room'])} meter(s), "
+                            f"total {processed['total_consumption']})")
+                return processed
+
+            logger.info(f"{key}: consType={cons_type} accepted but carries no values")
+            if empty is None:
+                empty = processed
+
+        return empty if empty is not None else self._process_consumption_data(
+            {}, self.CONS_TYPES[key][0], timeline_start, timeline_end
+        )
+
+    @staticmethod
+    def _cons_type_understood(raw_data, cons_type):
+        """
+        True if the portal actually understood `cons_type`.
+
+        An unknown consType is not rejected - the portal silently answers with
+        every consumption type at once, which would fold other categories'
+        meters into this one's per-room table and total.
+        """
+        if not isinstance(raw_data, dict):
+            return False
+        key_figures = {
+            entry.get("keyFigure")
+            for entry in (raw_data.get("chart") or [])
+            if isinstance(entry, dict) and entry.get("keyFigure") not in (None, "REF")
+        }
+        return key_figures <= {cons_type}
 
     def _process_consumption_data(self, raw_data, consumption_type, timeline_start, timeline_end):
         """
@@ -415,6 +494,7 @@ class MinolConnector:
             "reference_timeline": [],
             "total_consumption": 0.0,
             "total_source": "none",
+            "cons_type": consumption_type,
         }
 
         if not isinstance(raw_data, dict):
